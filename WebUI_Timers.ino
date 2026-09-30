@@ -52,6 +52,10 @@ function pad(n){return(n<10?'0':'')+n;}
 function rot(m,s){let o=0;for(let d=0;d<7;d++)if(m&(1<<d))o|=1<<((((d+s)%7)+7)%7);return o;}
 function conv(h,m,s,dir){let t=h*60+m+dir*OFF,ds=Math.floor(t/1440);t-=ds*1440;return{h:Math.floor(t/60),m:t%60,s:s,ds:ds};} // dir:+1 محلی→UTC ، -1 UTC→محلی
 
+// ---- تبدیل ساعت/دقیقه/ثانیه <-> ثانیه (برای مدت‌ها: برگشت تایمر، روشن/خاموش چشمک‌زن) ----
+function hms(pfx){return(+($(pfx+'h').value||0))*3600+(+($(pfx+'m').value||0))*60+(+($(pfx+'s').value||0));}
+function fillHms(pfx,sec){sec=sec||0;$(pfx+'h').value=Math.floor(sec/3600);$(pfx+'m').value=Math.floor((sec%3600)/60);$(pfx+'s').value=sec%60;}
+
 function toggleRelay(c){fetch('/toggle?ch='+c).then(update);}
 function update(){
  let t=Math.floor(Date.now()/1000);
@@ -88,7 +92,7 @@ function slotHTML(r,k){
  let wd='';
  DAYS.forEach(x=>{wd+=`<label class='wd'><input type='checkbox' id='wd${i}_${x[1]}'>${x[0]}</label>`;});
  return `<div class='slot'>
- <div class='hd'><b>اسلات ${k+1}</b><span class='run' id='st${i}'></span><label><input type='checkbox' id='en${i}'> فعال</label></div>
+ <div class='hd'><b>اسلات ${k+1}</b><span class='run' id='st${i}'></span></div>
  <div class='f'>
   <label>حالت <select id='md${i}' onchange='sync("${i}")'><option value='0'>زمان‌بند / تایمر</option><option value='1'>چشمک زن</option></select></label>
   <label>تکرار <select id='ty${i}' onchange='sync("${i}")'><option value='0'>یک‌بار</option><option value='1'>روزانه</option><option value='2'>هفتگی</option></select></label>
@@ -97,11 +101,27 @@ function slotHTML(r,k){
  <div class='f' id='wk${i}'>${wd}</div>
  <div class='f' id='nm${i}'>
   <label>عملکرد <select id='ac${i}'><option value='1'>روشن شود</option><option value='0'>خاموش شود</option></select></label>
-  <label>برگشت به حالت قبل بعد از <input type='number' id='du${i}' min='0' max='65535'> دقیقه (۰ = بدون برگشت)</label>
+ </div>
+ <div class='f' id='nm${i}b'>
+  <label>برگشت به حالت قبل بعد از
+   <input type='number' id='du${i}h' min='0' max='999'>ساعت
+   <input type='number' id='du${i}m' min='0' max='59'>دقیقه
+   <input type='number' id='du${i}s' min='0' max='59'>ثانیه
+  </label> (همه صفر = بدون برگشت)
  </div>
  <div class='f' id='bl${i}'>
-  <label>روشن <input type='number' id='bn${i}'> ثانیه</label>
-  <label>خاموش <input type='number' id='bf${i}'> ثانیه</label>
+  <label>روشن
+   <input type='number' id='bn${i}h' min='0' max='999'>ساعت
+   <input type='number' id='bn${i}m' min='0' max='59'>دقیقه
+   <input type='number' id='bn${i}s' min='0' max='59'>ثانیه
+  </label>
+ </div>
+ <div class='f' id='bl${i}b'>
+  <label>خاموش
+   <input type='number' id='bf${i}h' min='0' max='999'>ساعت
+   <input type='number' id='bf${i}m' min='0' max='59'>دقیقه
+   <input type='number' id='bf${i}s' min='0' max='59'>ثانیه
+  </label>
   <label>تعداد <input type='number' id='bc${i}' min='1' max='65535'> بار</label>
  </div>
  <div class='f'><button class='sv' onclick='save(${r},${k})'>ذخیره</button><button class='cl' onclick='clr(${r},${k})'>حذف</button><span class='msg' id='ms${i}'></span></div>
@@ -113,12 +133,13 @@ function sync(i){
  $('dtl'+i).style.display=ty==0?'':'none';
  $('wk'+i).style.display=ty==2?'':'none';
  $('nm'+i).style.display=md==0?'':'none';
+ $('nm'+i+'b').style.display=md==0?'':'none';
  $('bl'+i).style.display=md==1?'':'none';
+ $('bl'+i+'b').style.display=md==1?'':'none';
 }
 
 function fill(r,k,t){
  const i=r+'_'+k;
- $('en'+i).checked=!!t.enabled;
  $('md'+i).value=t.mode;
  $('ty'+i).value=t.type;
  const L=conv(t.hour,t.minute,t.second,-1);
@@ -129,11 +150,12 @@ function fill(r,k,t){
  const wm=rot(t.weekMask,L.ds);
  DAYS.forEach(x=>{$('wd'+i+'_'+x[1]).checked=!!(wm&(1<<x[1]));});
  $('ac'+i).value=t.state;
- $('du'+i).value=t.duration;
- $('bn'+i).value=t.blinkOn||BMIN;
- $('bf'+i).value=t.blinkOff||BMIN;
+ fillHms('du'+i,t.duration);
+ fillHms('bn'+i,t.blinkOn||BMIN);
+ fillHms('bf'+i,t.blinkOff||BMIN);
  $('bc'+i).value=t.blinkCount||1;
- let s=t.running?'▶ در حال اجرا':'';
+ let s=t.enabled?'':'— خالی —';
+ if(t.enabled&&t.running)s+=' ▶ در حال اجرا';
  if(t.enabled&&t.relay!=r)s+=' ⚠ این اسلات برای رله '+(t.relay+1)+' تنظیم شده؛ با ذخیره به این رله منتقل می‌شود';
  $('st'+i).textContent=s;
  sync(i);
@@ -170,14 +192,14 @@ function save(r,k){
    wm=rot(m,u.ds);
   }
  }
- let q='slot='+(r*SLOTS+k)+'&enabled='+($('en'+i).checked?1:0)+'&type='+ty+'&year='+Y+'&month='+M+'&day='+D+
+ // با ذخیره، این اسلات همیشه فعال می‌شود؛ برای غیرفعال‌کردن از دکمه‌ی «حذف» استفاده کن
+ let q='slot='+(r*SLOTS+k)+'&enabled=1&type='+ty+'&year='+Y+'&month='+M+'&day='+D+
   '&hour='+H+'&minute='+MI+'&second='+S+'&weekMask='+wm+'&relay='+r+'&mode='+md;
  if(md==0){
-  const du=+($('du'+i).value||0);
-  if(du<0||du>65535){msg(i,'مدت باید بین 0 تا 65535 دقیقه باشد',0);return;}
+  const du=hms('du'+i);
   q+='&state='+$('ac'+i).value+'&duration='+du;
  }else{
-  const bn=+$('bn'+i).value,bf=+$('bf'+i).value,bc=+$('bc'+i).value;
+  const bn=hms('bn'+i),bf=hms('bf'+i),bc=+$('bc'+i).value;
   if(bn<BMIN||bn>BMAX||bf<BMIN||bf>BMAX){msg(i,'زمان روشن/خاموش باید بین '+BMIN+' تا '+BMAX+' ثانیه باشد',0);return;}
   if(bc<1||bc>65535){msg(i,'تعداد باید حداقل 1 باشد',0);return;}
   q+='&state=1&blinkOn='+bn+'&blinkOff='+bf+'&blinkerCount='+bc;
@@ -190,21 +212,35 @@ function clr(r,k){
   r,r+'_'+k,'✓ حذف شد');
 }
 
+// ---- بازیابی رله بعد از بوت (سطح رله، نه اسلات) ----
+function loadRestore(r){
+ fetch('/getRelayRestore').then(x=>x.json()).then(d=>{$('rr'+r).checked=!!d.restore[r];}).catch(()=>{});
+}
+function saveRestore(r){
+ const v=$('rr'+r).checked?1:0;
+ fetch('/setRelayRestore?relay='+r+'&restore='+v).then(x=>x.text()).then(()=>{
+  const e=$('rrm'+r);e.style.color='#27ae60';e.textContent='✓ ذخیره شد';
+ }).catch(()=>{const e=$('rrm'+r);e.style.color='#c0392b';e.textContent='خطا در ارتباط با دستگاه';});
+}
+
 function openPanel(r){
  let p=$('pn'+r);
  if(!p){
   p=document.createElement('div');p.id='pn'+r;p.className='panel';
   let h=`<h3>تنظیمات رله ${r+1}</h3>
-  <div class='note'>ساعت و تاریخ به وقت محلی مرورگر شما هستند (به‌صورت خودکار به UTC تبدیل می‌شوند).<br>
-  زمان‌بند/تایمر: در زمان تعیین‌شده رله روشن/خاموش می‌شود؛ اگر «برگشت» بزرگ‌تر از صفر باشد، پس از آن مدت به حالت مخالف برمی‌گردد.<br>
-  چشمک زن: با روشن‌شدن شروع می‌شود، به تعداد دفعات تعیین‌شده (روشن+خاموش) تکرار می‌شود و در پایان رله خاموش می‌شود.<br>
-  اجرای خودکار فقط وقتی فعال است که ساعت دستگاه Sync شده باشد.</div>`;
+  <div class='f'><label><input type='checkbox' id='rr${r}'> بعد از ریست دستگاه، وضعیت و تایمرهای این رله بازیابی شوند</label>
+  <button class='sv' onclick='saveRestore(${r})'>ذخیره</button><span class='msg' id='rrm${r}'></span></div>`;
   for(let k=0;k<SLOTS;k++)h+=slotHTML(r,k);
+  h+=`<div class='note'>ساعت و تاریخ به وقت محلی مرورگر شما هستند (به‌صورت خودکار به UTC تبدیل می‌شوند).<br>
+  زمان‌بند/تایمر: در زمان تعیین‌شده رله روشن/خاموش می‌شود؛ اگر «برگشت» صفر نباشد، پس از آن مدت به حالت مخالف برمی‌گردد.<br>
+  چشمک زن: با روشن‌شدن شروع می‌شود، به تعداد دفعات تعیین‌شده (روشن+خاموش) تکرار می‌شود و در پایان رله خاموش می‌شود.<br>
+  اجرای خودکار فقط وقتی فعال است که ساعت دستگاه Sync شده باشد.<br>
+  اگر «بازیابی بعد از ریست» برای این رله خاموش باشد، این رله صرف‌نظر از وضعیت قبلی یا تایمرهای فعال، همیشه بعد از روشن‌شدن مجدد دستگاه خاموش می‌ماند.</div>`;
   p.innerHTML=h;$('panels').appendChild(p);
  }
  const show=p.style.display!='block';
  document.querySelectorAll('.panel').forEach(x=>x.style.display='none');
- if(show){p.style.display='block';load(r);}
+ if(show){p.style.display='block';load(r);loadRestore(r);}
 }
 </script></body></html>
 )rawliteral";
@@ -299,6 +335,52 @@ void handleDevTime()
 }
 
 //------------------------------------------------------
+//  بازیابی رله بعد از بوت (سطح رله، نه اسلات تایمر)
+//  server.on("/getRelayRestore", handleGetRelayRestore)
+//  server.on("/setRelayRestore", handleSetRelayRestore)
+//------------------------------------------------------
+void handleGetRelayRestore()
+{
+    String json;
+    json.reserve(40);
+    json += F("{\"restore\":[");
+
+    for (int i = 0; i < TOUCH_COUNT; i++)
+    {
+        if (i > 0)
+            json += ',';
+        json += relayRestoreOnBoot[i] ? '1' : '0';
+    }
+
+    json += F("]}");
+
+    server.send(200, "application/json", json);
+}
+
+void handleSetRelayRestore()
+{
+    if (!server.hasArg("relay") || !server.hasArg("restore"))
+    {
+        server.send(400, "text/plain", "Missing relay/restore");
+        return;
+    }
+
+    int r = server.arg("relay").toInt();
+
+    if (r < 0 || r >= TOUCH_COUNT)
+    {
+        server.send(400, "text/plain", "Bad relay");
+        return;
+    }
+
+    relayRestoreOnBoot[r] = server.arg("restore").toInt() != 0;
+
+    saveRelayState();   // بلافاصله ذخیره می‌شود (وابسته به تیک تناوبی taskRelaySave نمی‌مونه)
+
+    server.send(200, "text/plain", "OK");
+}
+
+//------------------------------------------------------
 //  /getTimers  نسخه‌ی کامل  (server.on("/getTimers", handleGetTimersV2))
 //  /getTimers            → همه‌ی اسلات‌ها
 //  /getTimers?relay=0    → فقط اسلات‌های رله‌ی 1
@@ -351,7 +433,7 @@ void handleGetTimersV2()
         json += F(",\"weekMask\":");   json += (int)t.weekMask;
         json += F(",\"relay\":");      json += (int)t.relayIndex;
         json += F(",\"state\":");      json += (t.relayState ? 1 : 0);
-        json += F(",\"duration\":");   json += (int)t.durationMinutes;
+        json += F(",\"duration\":");   json += (int)t.durationSeconds;
         json += F(",\"mode\":");       json += (int)t.mode;
         json += F(",\"blinkOn\":");    json += (unsigned long)t.blinkOnSeconds;
         json += F(",\"blinkOff\":");   json += (unsigned long)t.blinkOffSeconds;
