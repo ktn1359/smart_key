@@ -550,6 +550,11 @@ byte lastInputs = 0;
 unsigned long lastInputScan = 0;
 //--------------- Relay -----------------
 bool relayState[TOUCH_COUNT] = {0};
+// Flash snapshot is separate from live relay state. Timers, rules and PeerLink
+// may change relayState without persisting their runtime state.
+bool relaySavedState[TOUCH_COUNT] = {0};
+bool relaySavedTimeDependent[TOUCH_COUNT] = {0};
+bool suppressRelayPersistence = false;
 bool relayNeedSave = false;
 unsigned long relaySaveTimer = 0;
 
@@ -598,6 +603,9 @@ void taskBootRelayRestore();
 void updateOutputs();
 void saveRelayState();
 void loadRelayState();
+void setRelayRestoreOnBoot(byte index, bool restore, bool saveImmediately = false);
+void relaySetTransientState(byte index, bool state);
+void relaySetTransientToggle(byte index);
 //---------------- Touch ----------------
 void scanInputs();
 //---------------- LEDs ----------------
@@ -855,36 +863,61 @@ void loadRelayState()
 {
     File f = LittleFS.open("/relay.dat", "r");
 
-    size_t expectedSize = sizeof(relayState) + sizeof(relayTimeDependent) + sizeof(relayRestoreOnBoot);
+    const size_t currentSize =
+        sizeof(relaySavedState) +
+        sizeof(relaySavedTimeDependent) +
+        sizeof(relayRestoreOnBoot);
+    const size_t legacySize =
+        sizeof(relaySavedState) + sizeof(relaySavedTimeDependent);
+    const size_t oldestSize = sizeof(relaySavedState);
 
     if (!f)
     {
+        memset(relaySavedState, 0, sizeof(relaySavedState));
+        memset(relaySavedTimeDependent, 0, sizeof(relaySavedTimeDependent));
         memset(relayState, 0, sizeof(relayState));
         memset(relayTimeDependent, 0, sizeof(relayTimeDependent));
-       for (byte i = 0; i < TOUCH_COUNT; i++)
+        for (byte i = 0; i < TOUCH_COUNT; i++)
             relayRestoreOnBoot[i] = true;
         return;
     }
 
-    if (f.size() == expectedSize)
+    if (f.size() == currentSize)
     {
-        f.read((uint8_t *)relayState, sizeof(relayState));
-        f.read((uint8_t *)relayTimeDependent, sizeof(relayTimeDependent));
+        f.read((uint8_t *)relaySavedState, sizeof(relaySavedState));
+        f.read((uint8_t *)relaySavedTimeDependent, sizeof(relaySavedTimeDependent));
         f.read((uint8_t *)relayRestoreOnBoot, sizeof(relayRestoreOnBoot));
+    }
+    else if (f.size() == legacySize)
+    {
+        // Compatibility with firmware versions without per-relay restore flags.
+        f.read((uint8_t *)relaySavedState, sizeof(relaySavedState));
+        f.read((uint8_t *)relaySavedTimeDependent, sizeof(relaySavedTimeDependent));
+        for (byte i = 0; i < TOUCH_COUNT; i++)
+            relayRestoreOnBoot[i] = true;
+    }
+    else if (f.size() == oldestSize)
+    {
+        // Compatibility with the oldest format: relay states only.
+        f.read((uint8_t *)relaySavedState, sizeof(relaySavedState));
+        memset(relaySavedTimeDependent, 0, sizeof(relaySavedTimeDependent));
+        for (byte i = 0; i < TOUCH_COUNT; i++)
+            relayRestoreOnBoot[i] = true;
     }
     else
     {
-        // فایل مربوط به نسخه‌ی قدیمی‌تر فرموره (بدون relayRestoreOnBoot) یا خرابه؛
-        // یک‌بار با پیش‌فرض «بازیابی فعال» صفر می‌شه (رفتار قبلی حفظ می‌شه).
-        memset(relayState, 0, sizeof(relayState));
-        memset(relayTimeDependent, 0, sizeof(relayTimeDependent));
+        memset(relaySavedState, 0, sizeof(relaySavedState));
+        memset(relaySavedTimeDependent, 0, sizeof(relaySavedTimeDependent));
         for (byte i = 0; i < TOUCH_COUNT; i++)
             relayRestoreOnBoot[i] = true;
     }
 
     f.close();
-}
 
+    // Runtime state starts from the last user-persisted snapshot.
+    memcpy(relayState, relaySavedState, sizeof(relayState));
+    memcpy(relayTimeDependent, relaySavedTimeDependent, sizeof(relayTimeDependent));
+}
 //------------------------------------------------------
 
 /*
@@ -908,8 +941,9 @@ void saveRelayState()
     if (!f)
         return;
 
-    f.write((uint8_t *)relayState, sizeof(relayState));
-    f.write((uint8_t *)relayTimeDependent, sizeof(relayTimeDependent));
+    // Persist the snapshot, not live states changed by timers/rules/peers.
+    f.write((uint8_t *)relaySavedState, sizeof(relaySavedState));
+    f.write((uint8_t *)relaySavedTimeDependent, sizeof(relaySavedTimeDependent));
     f.write((uint8_t *)relayRestoreOnBoot, sizeof(relayRestoreOnBoot));
     f.close();
 }
@@ -1314,16 +1348,62 @@ void relayOff(byte index, bool timeDependent = false)
     }
 }
 */
+void markRelayStatePersistent(byte index)
+{
+    if (index >= TOUCH_COUNT)
+        return;
+
+    relaySavedState[index] = relayState[index];
+    relaySavedTimeDependent[index] = relayTimeDependent[index];
+    sys.relayNeedSave = true;
+}
+
+void setRelayRestoreOnBoot(byte index, bool restore, bool saveImmediately)
+{
+    if (index >= TOUCH_COUNT)
+        return;
+
+    bool changed = (relayRestoreOnBoot[index] != restore);
+    bool oldSavedState = relaySavedState[index];
+    bool oldSavedTimeDependent = relaySavedTimeDependent[index];
+
+    relayRestoreOnBoot[index] = restore;
+
+    if (!restore)
+    {
+        // Peer-controlled/client relays should boot OFF.
+        relaySavedState[index] = false;
+        relaySavedTimeDependent[index] = false;
+    }
+    else if (relayTimeDependent[index])
+    {
+        // Rebuild time-driven state only after clock sync/catch-up.
+        relaySavedState[index] = false;
+        relaySavedTimeDependent[index] = true;
+    }
+    else
+    {
+        relaySavedState[index] = relayState[index];
+        relaySavedTimeDependent[index] = false;
+    }
+
+    changed = changed ||
+              oldSavedState != relaySavedState[index] ||
+              oldSavedTimeDependent != relaySavedTimeDependent[index];
+
+    if (saveImmediately)
+        saveRelayState();
+    else if (changed)
+        sys.relayNeedSave = true;
+}
+
 void relayOn(byte index, bool timeDependent = false)
 {
     if (index >= TOUCH_COUNT)
         return;
 
-    bool stateChanged =
-        !relayState[index];
-
-    bool modeChanged =
-        relayTimeDependent[index] != timeDependent;
+    bool stateChanged = !relayState[index];
+    bool modeChanged = relayTimeDependent[index] != timeDependent;
 
     relayTimeDependent[index] = timeDependent;
 
@@ -1333,21 +1413,29 @@ void relayOn(byte index, bool timeDependent = false)
         updateOutputs();
     }
 
-    if (stateChanged || modeChanged)
+    if (timeDependent)
     {
-        sys.relayNeedSave = true;
+        // Never restore an automation-produced ON state after reboot.
+        if (!relaySavedTimeDependent[index] || relaySavedState[index])
+        {
+            relaySavedState[index] = false;
+            relaySavedTimeDependent[index] = true;
+            sys.relayNeedSave = true;
+        }
+    }
+    else if (!suppressRelayPersistence && (stateChanged || modeChanged))
+    {
+        markRelayStatePersistent(index);
     }
 }
+
 void relayOff(byte index, bool timeDependent = false)
 {
     if (index >= TOUCH_COUNT)
         return;
 
-    bool stateChanged =
-        relayState[index];
-
-    bool modeChanged =
-        relayTimeDependent[index] != timeDependent;
+    bool stateChanged = relayState[index];
+    bool modeChanged = relayTimeDependent[index] != timeDependent;
 
     relayTimeDependent[index] = timeDependent;
 
@@ -1357,26 +1445,21 @@ void relayOff(byte index, bool timeDependent = false)
         updateOutputs();
     }
 
-    if (stateChanged || modeChanged)
+    if (timeDependent)
     {
-        sys.relayNeedSave = true;
+        // A timer OFF is runtime state, not a persisted user preference.
+        if (!relaySavedTimeDependent[index] || relaySavedState[index])
+        {
+            relaySavedState[index] = false;
+            relaySavedTimeDependent[index] = true;
+            sys.relayNeedSave = true;
+        }
+    }
+    else if (!suppressRelayPersistence && (stateChanged || modeChanged))
+    {
+        markRelayStatePersistent(index);
     }
 }
-//------------------------------------------------------
-
-/*
-void relayToggle(byte index)
-{
-    if (index >= TOUCH_COUNT)
-        return;
-
-    relayState[index] = !relayState[index];
-
-    sys.relayNeedSave = true;
-
-    updateOutputs();
-}
-
 
 void relayToggle(byte index, bool timeDependent = false)
 {
@@ -1385,13 +1468,51 @@ void relayToggle(byte index, bool timeDependent = false)
 
     relayState[index] = !relayState[index];
     relayTimeDependent[index] = timeDependent;
-
-    sys.relayNeedSave = true;
-
     updateOutputs();
+
+    if (timeDependent)
+    {
+        if (!relaySavedTimeDependent[index] || relaySavedState[index])
+        {
+            relaySavedState[index] = false;
+            relaySavedTimeDependent[index] = true;
+            sys.relayNeedSave = true;
+        }
+    }
+    else if (!suppressRelayPersistence)
+    {
+        markRelayStatePersistent(index);
+    }
 }
 
-//------------------------------------------------------
+// State changes generated by rules or received over PeerLink are transient.
+void relaySetTransientState(byte index, bool state)
+{
+    if (index >= TOUCH_COUNT)
+        return;
+
+    bool previousSuppress = suppressRelayPersistence;
+    suppressRelayPersistence = true;
+
+    if (state)
+        relayOn(index, false);
+    else
+        relayOff(index, false);
+
+    suppressRelayPersistence = previousSuppress;
+}
+
+void relaySetTransientToggle(byte index)
+{
+    if (index >= TOUCH_COUNT)
+        return;
+
+    bool previousSuppress = suppressRelayPersistence;
+    suppressRelayPersistence = true;
+    relayToggle(index, false);
+    suppressRelayPersistence = previousSuppress;
+}
+
 void manualRelayOn(byte index)
 {
     if (index >= TOUCH_COUNT)
@@ -1399,22 +1520,9 @@ void manualRelayOn(byte index)
 
     cancelAutomationForRelay(index);
     relayOn(index, false);
+    // Persist deliberate user intent even when the relay was already ON.
+    markRelayStatePersistent(index);
 }
-*/
-void relayToggle(byte index, bool timeDependent = false)
-{
-    if (index >= TOUCH_COUNT)
-        return;
-
-    relayState[index] = !relayState[index];
-
-    relayTimeDependent[index] = timeDependent;
-
-    sys.relayNeedSave = true;
-
-    updateOutputs();
-}
-//------------------------------------------------------
 
 void manualRelayOff(byte index)
 {
@@ -1423,9 +1531,8 @@ void manualRelayOff(byte index)
 
     cancelAutomationForRelay(index);
     relayOff(index, false);
+    markRelayStatePersistent(index);
 }
-
-//------------------------------------------------------
 
 void manualRelayToggle(byte index)
 {
@@ -1434,10 +1541,8 @@ void manualRelayToggle(byte index)
 
     cancelAutomationForRelay(index);
     relayToggle(index, false);
+    markRelayStatePersistent(index);
 }
-
-
-//------------------------------------------------------
 
 bool relayGetState(byte index)
 {
@@ -1447,8 +1552,6 @@ bool relayGetState(byte index)
     return relayState[index];
 }
 
-//------------------------------------------------------
-
 void allRelayOff(bool timeDependent = false)
 {
     for (byte i = 0; i < TOUCH_COUNT; i++)
@@ -1456,29 +1559,49 @@ void allRelayOff(bool timeDependent = false)
         relayState[i] = false;
         relayTimeDependent[i] = timeDependent;
 
+        if (timeDependent)
+        {
+            relaySavedState[i] = false;
+            relaySavedTimeDependent[i] = true;
+        }
+        else if (!suppressRelayPersistence)
+        {
+            relaySavedState[i] = false;
+            relaySavedTimeDependent[i] = false;
+        }
     }
 
-    sys.relayNeedSave = true;
+    if (timeDependent || !suppressRelayPersistence)
+        sys.relayNeedSave = true;
 
     updateOutputs();
 }
-
-//------------------------------------------------------
 
 void allRelayOn(bool timeDependent = false)
 {
     for (byte i = 0; i < TOUCH_COUNT; i++)
     {
         relayState[i] = true;
-                        relayTimeDependent[i] = timeDependent;
+        relayTimeDependent[i] = timeDependent;
 
+        if (timeDependent)
+        {
+            // Time-based ON must be reconstructed after clock sync.
+            relaySavedState[i] = false;
+            relaySavedTimeDependent[i] = true;
+        }
+        else if (!suppressRelayPersistence)
+        {
+            relaySavedState[i] = true;
+            relaySavedTimeDependent[i] = false;
+        }
     }
 
-    sys.relayNeedSave = true;
+    if (timeDependent || !suppressRelayPersistence)
+        sys.relayNeedSave = true;
 
     updateOutputs();
 }
-
 
 //=========================//9=============================
 //                      TOUCH
@@ -3293,6 +3416,13 @@ void initStorage()
           if (!relayRestoreOnBoot[i])
           {
               relayState[i] = false;   // بازیابی این رله غیرفعاله؛ صرف‌نظر از هر چیزی خاموش بمونه
+              relayTimeDependent[i] = false;
+              if (relaySavedState[i] || relaySavedTimeDependent[i])
+              {
+                  relaySavedState[i] = false;
+                  relaySavedTimeDependent[i] = false;
+                  sys.relayNeedSave = true;
+              }
               continue;
           }
 
@@ -3452,11 +3582,13 @@ void runSystem()
     //==================================================
 
     if (timeManager.quality == TIME_SYNCED)
-    {
         taskScheduler();
-        taskRuleManager();
-        processPendingRuleActions();
-    }
+
+    // Relay-state/scenario rules and delayed actions are not inherently
+    // wall-clock dependent. executeRule() defers only rules whose trigger
+    // or condition currently depends on a time-driven relay.
+    taskRuleManager();
+    processPendingRuleActions();
     // -----------------------------
     // MANUAL INPUTS — HIGHEST PRIORITY
     // -----------------------------
@@ -5314,15 +5446,15 @@ void executeRuleAction(Rule &r)
     switch (r.actionType)
     {
         case RULE_ACTION_RELAY_ON:
-            relayOn(r.actionTarget);
+            relaySetTransientState(r.actionTarget, true);
             break;
 
         case RULE_ACTION_RELAY_OFF:
-            relayOff(r.actionTarget);
+            relaySetTransientState(r.actionTarget, false);
             break;
 
         case RULE_ACTION_RELAY_TOGGLE:
-            relayToggle(r.actionTarget);
+            relaySetTransientToggle(r.actionTarget);
             break;
 
         default:
@@ -5334,6 +5466,18 @@ void executeRuleAction(Rule &r)
 
 void executeRule(Rule &r, uint8_t ruleIndex)
 {
+    if (r.triggerType == RULE_TRIGGER_RELAY_STATE &&
+        r.triggerSource < TOUCH_COUNT &&
+        relayTimeDependent[r.triggerSource] &&
+        timeManager.quality != TIME_SYNCED)
+        return;
+
+    if (r.conditionType == RULE_CONDITION_RELAY_STATE &&
+        r.conditionSource < TOUCH_COUNT &&
+        relayTimeDependent[r.conditionSource] &&
+        timeManager.quality != TIME_SYNCED)
+        return;
+
     bool triggerState = checkRuleTrigger(r);
 
     // Trigger از ON به OFF یا OFF به ON تغییر کرده
@@ -5492,6 +5636,18 @@ void loadRules()
             DBG_PRINTLN("Rules: read failed");
 
         return;
+    }
+
+    // Reset persisted edge memory so active level rules are reconciled once
+    // against the restored runtime state after boot, rather than trusting a
+    // stale pre-reboot lastTriggerState. Scenario pulses themselves are not replayed.
+    for (uint8_t i = 0; i < MAX_RULES; i++)
+    {
+        Rule &r = rules[i];
+        r.lastTriggerState = false;
+
+        if (r.triggerType == RULE_TRIGGER_SCENARIO)
+            r.lastScenarioEvent = scenarioEventCounter;
     }
 
     if (debug)
@@ -5716,7 +5872,7 @@ void processBlinkerTimer(Timer &t, time_t now)
     // Blinker finished
     if ((uint32_t)elapsed >= totalSeconds)
     {
-        relayOff(t.relayIndex);
+        relayOff(t.relayIndex, true);
 
         t.blinkStartTime  = 0;
         t.blinkEndTime    = 0;

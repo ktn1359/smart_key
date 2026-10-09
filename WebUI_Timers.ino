@@ -373,9 +373,8 @@ void handleSetRelayRestore()
         return;
     }
 
-    relayRestoreOnBoot[r] = server.arg("restore").toInt() != 0;
-
-    saveRelayState();   // بلافاصله ذخیره می‌شود (وابسته به تیک تناوبی taskRelaySave نمی‌مونه)
+    bool restore = server.arg("restore").toInt() != 0;
+    setRelayRestoreOnBoot((byte)r, restore, true);
 
     server.send(200, "text/plain", "OK");
 }

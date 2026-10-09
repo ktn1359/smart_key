@@ -138,9 +138,9 @@ void applyCloudRelayCommand(const String &body)
             token.trim();
 
             if (token == "1")
-                relayOn(idx, false);
+                manualRelayOn(idx);
             else if (token == "0")
-                relayOff(idx, false);
+                manualRelayOff(idx);
             // هر مقدار دیگه (مثلاً x) یعنی این رله رو دست نزن
 
             start = i + 1;
