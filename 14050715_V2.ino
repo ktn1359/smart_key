@@ -1353,8 +1353,24 @@ void markRelayStatePersistent(byte index)
     if (index >= TOUCH_COUNT)
         return;
 
-    relaySavedState[index] = relayState[index];
-    relaySavedTimeDependent[index] = relayTimeDependent[index];
+    // A relay configured as a non-restoring PeerLink/client output remains
+    // OFF after reboot even if its live state was changed manually.
+    if (!relayRestoreOnBoot[index])
+    {
+        relaySavedState[index] = false;
+        relaySavedTimeDependent[index] = false;
+    }
+    else if (relayTimeDependent[index])
+    {
+        relaySavedState[index] = false;
+        relaySavedTimeDependent[index] = true;
+    }
+    else
+    {
+        relaySavedState[index] = relayState[index];
+        relaySavedTimeDependent[index] = false;
+    }
+
     sys.relayNeedSave = true;
 }
 
@@ -3427,7 +3443,17 @@ void initStorage()
           }
 
            if (relayTimeDependent[i])
+           {
               relayState[i] = false;   // موقتاً در RAM؛ تا Catch-up تصمیم واقعی را بگیرد
+
+              // Clear any stale persisted ON snapshot from older firmware.
+              if (relaySavedState[i] || !relaySavedTimeDependent[i])
+              {
+                  relaySavedState[i] = false;
+                  relaySavedTimeDependent[i] = true;
+                  sys.relayNeedSave = true;
+              }
+           }
       }
 
     
