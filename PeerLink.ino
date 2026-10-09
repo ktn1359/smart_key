@@ -120,6 +120,7 @@ void peerLinkSendCmd(PendingCmd &p);
 
 uint16_t nextCommandId        = 1;
 unsigned long nextAnnounceAt  = 0;
+bool peerLinkTimeSyncedForResync = false;
 
 char peerLinkSecret[32] = "CHANGE_ME_SECRET";   // از وب (setPeerLinkSecret) قابل تغییره
 
@@ -333,6 +334,18 @@ void resyncPeer(uint8_t peerIdx)
         if (r.triggerSource >= TOUCH_COUNT)
             continue;
 
+        // Avoid treating a time-driven relay's temporary boot-OFF state
+        // as its real trigger before time sync and scheduler catch-up.
+        if (relayTimeDependent[r.triggerSource] &&
+            timeManager.quality != TIME_SYNCED)
+            continue;
+
+        if (r.conditionType == RULE_CONDITION_RELAY_STATE &&
+            r.conditionSource < TOUCH_COUNT &&
+            relayTimeDependent[r.conditionSource] &&
+            timeManager.quality != TIME_SYNCED)
+            continue;
+
         if (r.actionType != RULE_ACTION_RELAY_ON && r.actionType != RULE_ACTION_RELAY_OFF)
             continue;   // Resync فقط برای SET معنی داره
 
@@ -480,10 +493,10 @@ void handleCmdPacket(const String &pkt, IPAddress remoteIP)
 
     if (relay < TOUCH_COUNT && peerLinkShouldApply(srcId, cmdId))
     {
-        if (wantOn)
-            relayOn(relay, false);
-        else
-            relayOff(relay, false);
+        // A relay commanded by another device is a client output; do not
+        // persist its runtime ON/OFF state for restoration after reboot.
+        setRelayRestoreOnBoot(relay, false, false);
+        relaySetTransientState(relay, wantOn);
     }
 
     // همیشه ACK بفرست — چه اعمال شد چه (چون قدیمی/تکراری/بی‌ترتیب بود)
@@ -597,6 +610,7 @@ void initPeerLink()
 
     randomSeed(ESP.getChipId() ^ micros());
 
+    peerLinkTimeSyncedForResync = false;
     nextAnnounceAt = millis() + (unsigned long)random(0, (long)ANNOUNCE_JITTER_MS);
 }
 
@@ -606,6 +620,19 @@ void initPeerLink()
 void taskPeerLink()
 {
     unsigned long now = millis();
+
+    // If a peer announced while this device lacked valid time, resync again
+    // after scheduler catch-up makes time-driven source states authoritative.
+    bool timeSynced = (timeManager.quality == TIME_SYNCED);
+    if (timeSynced && !peerLinkTimeSyncedForResync)
+    {
+        for (uint8_t i = 0; i < MAX_PEERS; i++)
+        {
+            if (isPeerOnline(i))
+                resyncPeer(i);
+        }
+    }
+    peerLinkTimeSyncedForResync = timeSynced;
 
     // ۱) ANNOUNCE دوره‌ای
     if ((long)(now - nextAnnounceAt) >= 0)
