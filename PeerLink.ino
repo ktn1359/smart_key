@@ -337,13 +337,13 @@ void resyncPeer(uint8_t peerIdx)
         // Avoid treating a time-driven relay's temporary boot-OFF state
         // as its real trigger before time sync and scheduler catch-up.
         if (relayTimeDependent[r.triggerSource] &&
-            timeManager.quality != TIME_SYNCED)
+            !hasValidClock())
             continue;
 
         if (r.conditionType == RULE_CONDITION_RELAY_STATE &&
             r.conditionSource < TOUCH_COUNT &&
             relayTimeDependent[r.conditionSource] &&
-            timeManager.quality != TIME_SYNCED)
+            !hasValidClock())
             continue;
 
         if (r.actionType != RULE_ACTION_RELAY_ON && r.actionType != RULE_ACTION_RELAY_OFF)
@@ -623,8 +623,8 @@ void taskPeerLink()
 
     // If a peer announced while this device lacked valid time, resync again
     // after scheduler catch-up makes time-driven source states authoritative.
-    bool timeSynced = (timeManager.quality == TIME_SYNCED);
-    if (timeSynced && !peerLinkTimeSyncedForResync)
+    bool clockValid = hasValidClock();
+    if (clockValid && !peerLinkTimeSyncedForResync)
     {
         for (uint8_t i = 0; i < MAX_PEERS; i++)
         {
@@ -632,7 +632,7 @@ void taskPeerLink()
                 resyncPeer(i);
         }
     }
-    peerLinkTimeSyncedForResync = timeSynced;
+    peerLinkTimeSyncedForResync = clockValid;
 
     // ۱) ANNOUNCE دوره‌ای
     if ((long)(now - nextAnnounceAt) >= 0)
