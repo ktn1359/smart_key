@@ -184,7 +184,7 @@ enum TimerType : uint8_t
 struct TimeManager
 {
     bool initialized;
-    bool ntpSynced;
+    bool ntpSynced; // true once a plausible epoch was initialized by NTP or Client
 
     TimeQuality quality;
     TimeSource  source;      // <-- این خط اضافه شد
@@ -1095,9 +1095,8 @@ void updateOutputs()
         if (relayState[i])
         {
             //==================================================
-            // Relayهایی که وضعیتشان وابسته به زمان است
-            // قبل از TIME_SYNCED نباید روی خروجی فیزیکی اعمال شوند.
-            //
+            // Relayهای زمان‌محور فقط وقتی ساعت معتبر است روی خروجی اعمال می‌شوند.
+            // کیفیت Sync (SYNCED/ESTIMATED) به‌تنهایی مجوز اجرا را تعیین نمی‌کند.
             // Manual relayها مستقل از زمان هستند و در بوت قابل Restore هستند.
             //==================================================
             if (relayTimeDependent[i] &&
@@ -3925,10 +3924,9 @@ void taskTimeManager()
     debugPrintTimeStatus();
 
     // --------------------------------------------------
-    // Quality بر اساس "کهنگی" آخرین Sync واقعی محاسبه می‌شود
-    // (نه فقط اینکه تا حالا sync شده یا نه)
-    // از فیلدهای موجود (ntpSynced, lastSyncTime) استفاده شده،
-    // هیچ فیلد یا تابع جدیدی اضافه نشده است
+    // Quality is diagnostic: it reflects the age of the last NTP/Client
+    // clock adjustment. Scheduling validity is checked separately by
+    // hasValidClock(), so ESTIMATED can still be usable.
     // --------------------------------------------------
  if (timeManager.ntpSynced)
     {
@@ -4323,8 +4321,8 @@ void taskScheduler()
     //     return;
             //==================================================
             // AUTOMATION TIME GATE
-            // Timer / Blinker فقط بعد از Sync معتبر زمان
-            // اجازه اجرا دارند
+            // Timer / Blinker فقط وقتی ساعت معتبر است اجازه اجرا دارند؛
+            // قدیمی‌شدن Sync فقط کیفیت تشخیصی را به ESTIMATED تغییر می‌دهد.
             //==================================================
 
             if (!hasValidClock())
