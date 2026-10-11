@@ -32,6 +32,8 @@
 #define TOUCH_SCENARIO_FILE       "/touchscn.dat"
 
 #define PEER_OFFLINE_MS           180000UL   // 3 دقیقه بدون ANNOUNCE = آفلاین
+#define PEERLINK_BOOT_GRACE_MS    20000UL    // بعد از بوت، تا این مدت وضعیت این دستگاه مرجع حساب نمی‌شود و Resync نمی‌فرستد
+#define PEERLINK_CMDID_REORDER_WINDOW 16     // فرمان با commandId عقب‌تر از این پنجره = ریست فرستنده، نه فرمان قدیمی
 #define ANNOUNCE_INTERVAL_MS      60000UL
 #define ANNOUNCE_JITTER_MS        10000UL    // ± تصادفی، برای پخش‌شدن بین دستگاه‌ها
 
@@ -90,8 +92,11 @@ bool peerLinkShouldApply(const String &srcId, uint16_t cmdId)
         {
             int16_t diff = (int16_t)(cmdId - cmdSources[i].lastCmdId);
 
-            if (diff <= 0)
-                return false;   // قدیمی‌تر یا تکراریه؛ اعمال نکن (ولی بازم Ack می‌خوره)
+            // قدیمی‌تر/تکراری/بی‌ترتیب (داخل یک پنجره‌ی کوچک) → اعمال نکن (ولی بازم Ack می‌خوره).
+            // اگر شمارنده‌ی فرستنده خیلی عقب‌تر باشد، فرستنده ریست شده و شمارنده را از نو
+            // شروع کرده؛ آن را قبول کن و مبنا را بازنشانی کن (وگرنه تا ده‌ها فرمان نادیده گرفته می‌شد).
+            if (diff <= 0 && diff > -PEERLINK_CMDID_REORDER_WINDOW)
+                return false;
 
             cmdSources[i].lastCmdId = cmdId;
             return true;
@@ -121,6 +126,32 @@ void peerLinkSendCmd(PendingCmd &p);
 uint16_t nextCommandId        = 1;
 unsigned long nextAnnounceAt  = 0;
 bool peerLinkTimeSyncedForResync = false;
+unsigned long peerLinkBootAt = 0;        // لحظه‌ی اولین اتصال WiFi بعد از بوت (در taskPeerLink ست می‌شود)
+bool peerLinkGraceStarted = false;
+
+// از بوت تا PEERLINK_BOOT_GRACE_MS بعد از «اولین اتصال WiFi»، این دستگاه وضعیت خودش را
+// مرجع نمی‌داند و برای Peerها Resync نمی‌فرستد (شبکه برنده است).
+// شمارش از اتصال WiFi شروع می‌شود تا اگر مودم دیر بالا آمد، Grace قبل از دیدن Peerها تمام نشود.
+bool peerLinkInBootGrace()
+{
+    if (!peerLinkGraceStarted)
+        return true;
+
+    return (millis() - peerLinkBootAt) < PEERLINK_BOOT_GRACE_MS;
+}
+
+// منبعی که ریست شده (HELLO فرستاده) باید از جدول commandId پاک شود.
+void peerLinkForgetSource(const String &srcId)
+{
+    for (int i = 0; i < MAX_CMD_SOURCES; i++)
+    {
+        if (cmdSources[i].used && srcId == cmdSources[i].deviceId)
+        {
+            cmdSources[i].used = false;
+            cmdSources[i].lastCmdId = 0;
+        }
+    }
+}
 
 char peerLinkSecret[32] = "CHANGE_ME_SECRET";   // از وب (setPeerLinkSecret) قابل تغییره
 
@@ -306,6 +337,21 @@ void peerLinkSendAnnounce()
 }
 
 //------------------------------------------------------
+//  HELLO: بعد از هر بوت (وصل شدن WiFi) فرستاده می‌شود تا Peerهای در حال کار
+//  بلافاصله وضعیت فعلی‌شان را برای این دستگاه بفرستند (شبکه برنده است).
+//  دستگاه‌های قدیمی این نوع بسته را نمی‌شناسند و نادیده می‌گیرند.
+//------------------------------------------------------
+void peerLinkSendHello()
+{
+    String body = "HELLO|" + peerLinkDeviceUID();
+    String tag  = peerLinkSign(body);
+
+    udp.beginPacket(IPAddress(255, 255, 255, 255), UDP_PORT);
+    udp.print(body + "|" + tag);
+    udp.endPacket();
+}
+
+//------------------------------------------------------
 //  وقتی یه Peer که قبلاً آفلاین بود دوباره ANNOUNCE می‌فرسته،
 //  وضعیت فعلی هر Rule محلی‌ای که به اون Peer وصله رو دوباره
 //  (idempotent، SET) براش می‌فرستیم تا چیزی که حین آفلاین‌بودنش
@@ -337,13 +383,13 @@ void resyncPeer(uint8_t peerIdx)
         // Avoid treating a time-driven relay's temporary boot-OFF state
         // as its real trigger before time sync and scheduler catch-up.
         if (relayTimeDependent[r.triggerSource] &&
-            timeManager.quality != TIME_SYNCED)
+            !hasValidClock())
             continue;
 
         if (r.conditionType == RULE_CONDITION_RELAY_STATE &&
             r.conditionSource < TOUCH_COUNT &&
             relayTimeDependent[r.conditionSource] &&
-            timeManager.quality != TIME_SYNCED)
+            !hasValidClock())
             continue;
 
         if (r.actionType != RULE_ACTION_RELAY_ON && r.actionType != RULE_ACTION_RELAY_OFF)
@@ -394,7 +440,41 @@ void handleAnnouncePacket(const String &pkt, IPAddress remoteIP)
     peers[idx].ip = (uint32_t)remoteIP;
     peers[idx].lastSeenMs = millis();
 
-    if (wasOffline)
+    // دستگاهی که تازه بوت شده (هنوز در Grace) وضعیت خودش را مرجع نمی‌داند
+    if (wasOffline && !peerLinkInBootGrace())
+        resyncPeer(idx);
+}
+
+void handleHelloPacket(const String &pkt, IPAddress remoteIP)
+{
+    String parts[3];
+    int n = peerLinkSplit(pkt, parts, 3);
+    if (n != 3) return;
+
+    String body = parts[0] + "|" + parts[1];
+    String tag  = parts[2];
+
+    if (!peerLinkVerify(body, tag))
+        return;
+
+    String deviceId = parts[1];
+
+    if (deviceId == peerLinkDeviceUID())
+        return;   // Broadcast خودمان
+
+    int idx = findPeerByDeviceId(deviceId.c_str());
+
+    if (idx < 0)
+        return;
+
+    // فرستنده ریست شده؛ شمارنده‌ی commandId او از نو شروع می‌شود
+    peerLinkForgetSource(deviceId);
+
+    peers[idx].ip = (uint32_t)remoteIP;
+    peers[idx].lastSeenMs = millis();
+
+    // وضعیت فعلی ما را برای دستگاه تازه‌روشن بفرست (به شرط اینکه خودمان در Grace نباشیم)
+    if (!peerLinkInBootGrace())
         resyncPeer(idx);
 }
 
@@ -493,10 +573,13 @@ void handleCmdPacket(const String &pkt, IPAddress remoteIP)
 
     if (relay < TOUCH_COUNT && peerLinkShouldApply(srcId, cmdId))
     {
-        // A relay commanded by another device is a client output; do not
-        // persist its runtime ON/OFF state for restoration after reboot.
-        setRelayRestoreOnBoot(relay, false, false);
-        relaySetTransientState(relay, wantOn);
+        // فرمان Peer مثل فرمان محلی کاربر اعمال می‌شود: اگر «بازیابی پس از بوت»
+        // این رله فعال باشد، وضعیت ذخیره می‌شود. تنظیم relayRestoreOnBoot را
+        // هرگز خودکار عوض نمی‌کنیم (انتخاب کاربر است).
+        if (wantOn)
+            relayOn(relay, false);
+        else
+            relayOff(relay, false);
     }
 
     // همیشه ACK بفرست — چه اعمال شد چه (چون قدیمی/تکراری/بی‌ترتیب بود)
@@ -594,6 +677,7 @@ void handlePeerLinkPacket(const char *packet, IPAddress remoteIP)
     String type = pkt.substring(0, p1);
 
     if (type == "ANNOUNCE") { handleAnnouncePacket(pkt, remoteIP); return; }
+    if (type == "HELLO")    { handleHelloPacket(pkt, remoteIP);    return; }
     if (type == "CMD")      { handleCmdPacket(pkt, remoteIP);      return; }
     if (type == "ACK")      { handleAckPacket(pkt);                return; }
     if (type == "SCENE")    { handleScenePacket(pkt);              return; }
@@ -611,6 +695,13 @@ void initPeerLink()
     randomSeed(ESP.getChipId() ^ micros());
 
     peerLinkTimeSyncedForResync = false;
+    peerLinkGraceStarted = false;
+    peerLinkBootAt = millis();
+
+    // شمارنده‌ی فرمان بعد از هر بوت از یک نقطه‌ی تصادفی شروع می‌شود تا
+    // گیرنده‌ها فرمان‌های دستگاهِ ریست‌شده را با commandId قدیمی اشتباه نگیرند.
+    nextCommandId = (uint16_t)random(1, 65535);
+
     nextAnnounceAt = millis() + (unsigned long)random(0, (long)ANNOUNCE_JITTER_MS);
 }
 
@@ -621,18 +712,49 @@ void taskPeerLink()
 {
     unsigned long now = millis();
 
+    // شروع Grace از اولین اتصال WiFi بعد از بوت
+    if (!peerLinkGraceStarted && sys.wifiConnected)
+    {
+        peerLinkGraceStarted = true;
+        peerLinkBootAt = now;
+    }
+
     // If a peer announced while this device lacked valid time, resync again
     // after scheduler catch-up makes time-driven source states authoritative.
-    bool timeSynced = (timeManager.quality == TIME_SYNCED);
-    if (timeSynced && !peerLinkTimeSyncedForResync)
+    // در Grace بعد از بوت، فلگ تغییر نمی‌کند تا این Resync بعد از Grace از دست نرود.
+    bool timeSynced = hasValidClock();
+    if (!peerLinkInBootGrace())
     {
-        for (uint8_t i = 0; i < MAX_PEERS; i++)
+        if (timeSynced && !peerLinkTimeSyncedForResync)
         {
-            if (isPeerOnline(i))
-                resyncPeer(i);
+            for (uint8_t i = 0; i < MAX_PEERS; i++)
+            {
+                if (isPeerOnline(i))
+                    resyncPeer(i);
+            }
+        }
+        peerLinkTimeSyncedForResync = timeSynced;
+    }
+
+    // HELLO بعد از بوت: دو بار، ۱.۵ و ۴ ثانیه بعد از وصل شدن WiFi
+    {
+        static unsigned long helloAt = 0;
+        static uint8_t       helloLeft = 2;
+
+        if (helloLeft && sys.wifiConnected)
+        {
+            if (helloAt == 0)
+            {
+                helloAt = now + 1500UL;
+            }
+            else if ((long)(now - helloAt) >= 0)
+            {
+                peerLinkSendHello();
+                helloLeft--;
+                helloAt = now + 2500UL;
+            }
         }
     }
-    peerLinkTimeSyncedForResync = timeSynced;
 
     // ۱) ANNOUNCE دوره‌ای
     if ((long)(now - nextAnnounceAt) >= 0)
