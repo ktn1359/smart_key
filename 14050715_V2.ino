@@ -146,8 +146,8 @@ PersistentData persist;
 //              TIME Manager & Scheduler 
 //======================================================
 #define MAX_TIMERS 16 // تعداد تایمرها
-#define TIME_RESYNC_INTERVAL 30000UL//21600000UL   // 6 hours
-#define TIME_STALE_THRESHOLD 60UL//86400UL   // مثلا 24 ساعت - عدد دلخواه پروژه
+#define TIME_RESYNC_INTERVAL 21600000UL // 6 hours
+#define TIME_STALE_THRESHOLD 86400UL     // 24 hours; diagnostic freshness only
 
 #define TIMER_MODE_NORMAL   0
 #define TIMER_MODE_BLINKER  1
@@ -184,7 +184,7 @@ enum TimerType : uint8_t
 struct TimeManager
 {
     bool initialized;
-    bool ntpSynced;
+    bool ntpSynced; // true once a plausible epoch was initialized by NTP or Client
 
     TimeQuality quality;
     TimeSource  source;      // <-- این خط اضافه شد
@@ -664,6 +664,7 @@ void initTimeManager();
 void debugPrintTimeStatus();
 void onTimeSynced(bool fromSntp);
 void applyClientTimeSync(time_t clientUtc);
+bool hasValidClock();
 
 void taskScheduler();
 void handleSetTimer();
@@ -1094,13 +1095,12 @@ void updateOutputs()
         if (relayState[i])
         {
             //==================================================
-            // Relayهایی که وضعیتشان وابسته به زمان است
-            // قبل از TIME_SYNCED نباید روی خروجی فیزیکی اعمال شوند.
-            //
+            // Relayهای زمان‌محور فقط وقتی ساعت معتبر است روی خروجی اعمال می‌شوند.
+            // کیفیت Sync (SYNCED/ESTIMATED) به‌تنهایی مجوز اجرا را تعیین نمی‌کند.
             // Manual relayها مستقل از زمان هستند و در بوت قابل Restore هستند.
             //==================================================
             if (relayTimeDependent[i] &&
-                timeManager.quality != TIME_SYNCED)
+                !hasValidClock())
             {
                 continue;
             }
@@ -3607,7 +3607,7 @@ void runSystem()
     // فقط بعد از معتبر شدن زمان اجرا شوند
     //==================================================
 
-    if (timeManager.quality == TIME_SYNCED)
+    if (hasValidClock())
         taskScheduler();
 
     // Relay-state/scenario rules and delayed actions are not inherently
@@ -3924,10 +3924,9 @@ void taskTimeManager()
     debugPrintTimeStatus();
 
     // --------------------------------------------------
-    // Quality بر اساس "کهنگی" آخرین Sync واقعی محاسبه می‌شود
-    // (نه فقط اینکه تا حالا sync شده یا نه)
-    // از فیلدهای موجود (ntpSynced, lastSyncTime) استفاده شده،
-    // هیچ فیلد یا تابع جدیدی اضافه نشده است
+    // Quality is diagnostic: it reflects the age of the last NTP/Client
+    // clock adjustment. Scheduling validity is checked separately by
+    // hasValidClock(), so ESTIMATED can still be usable.
     // --------------------------------------------------
  if (timeManager.ntpSynced)
     {
@@ -4114,20 +4113,45 @@ void debugPrintTimeStatus()
 
 void applyClientTimeSync(time_t clientUtc)
 {
-    if (timeManager.quality == TIME_SYNCED)
-        return;   // NTP تازه است - اولویت با NTP، Client نادیده گرفته می‌شود
-
     if (clientUtc <= 1700000000)
         return;   // مقدار نامعتبر
 
-    struct timeval tv = { clientUtc, 0 };
-    settimeofday(&tv, nullptr);
+    // Prefer a fresh NTP clock, but let Client correct a stale NTP estimate.
+    if (timeManager.source == SOURCE_NTP && timeManager.ntpSynced)
+    {
+        time_t ntpAge = getCurrentTime() - timeManager.lastSyncTime;
+        if (ntpAge < 0)
+            ntpAge = 0;
 
-    timeManager.ntpSynced    = true;
+        if ((uint64_t)ntpAge <= TIME_STALE_THRESHOLD)
+            return;
+    }
+
+    bool hadValidClock = hasValidClock();
+    time_t previousUtc = getCurrentTime();
+
+    struct timeval tv = { clientUtc, 0 };
+    if (settimeofday(&tv, nullptr) != 0)
+    {
+        if (debug)
+            DBG_PRINTLN("Client time correction failed");
+        return;
+    }
+
+    // Catch-up must be recalculated after a meaningful correction in either
+    // direction. The scheduler consumes this shared flag exactly once.
+    time_t delta = clientUtc - previousUtc;
+    if (delta < 0)
+        delta = -delta;
+    if (hadValidClock && delta > 120)
+        schedulerCatchupApplied = false;
+
+    timeManager.ntpSynced    = true;  // Means a valid epoch has been initialized.
     timeManager.source       = SOURCE_CLIENT;
     timeManager.lastSyncTime = clientUtc;
+    timeManager.quality      = TIME_SYNCED;
 
-    if (!debug)
+    if (debug)
     {
         struct tm* tmInfo = gmtime(&clientUtc);
         char buffer[24];
@@ -4137,7 +4161,7 @@ void applyClientTimeSync(time_t clientUtc)
         else
             strcpy(buffer, "N/A");
 
-        DBG_PRINT("Time corrected via Client/App fallback - UTC : ");
+        DBG_PRINT("Time corrected via Client/App - UTC: ");
         DBG_PRINTLN(buffer);
     }
 }
@@ -4158,6 +4182,13 @@ void handleTimeSync()
 time_t getCurrentTime()
 {
     return time(nullptr);
+}
+
+// Clock validity is separate from sync freshness/quality. Once NTP or Client
+// has supplied a plausible epoch, ESTIMATED remains usable for scheduling.
+bool hasValidClock()
+{
+    return timeManager.ntpSynced && getCurrentTime() > 1700000000;
 }
 
 //======================================================
@@ -4278,7 +4309,7 @@ void taskScheduler()
 void taskScheduler()
 {
     static unsigned long lastCheck = 0;
-    static bool catchupApplied = false;
+    // Uses the shared catch-up flag so clock corrections can invalidate it.
 
     // Scheduler resolution = 1 second
     if (millis() - lastCheck < 1000)
@@ -4290,20 +4321,20 @@ void taskScheduler()
     //     return;
             //==================================================
             // AUTOMATION TIME GATE
-            // Timer / Blinker فقط بعد از Sync معتبر زمان
-            // اجازه اجرا دارند
+            // Timer / Blinker فقط وقتی ساعت معتبر است اجازه اجرا دارند؛
+            // قدیمی‌شدن Sync فقط کیفیت تشخیصی را به ESTIMATED تغییر می‌دهد.
             //==================================================
 
-            if (timeManager.quality != TIME_SYNCED)
+            if (!hasValidClock())
                 return;
     //==================================================
     // CATCH-UP
     //==================================================
 
-    if (!catchupApplied)
+    if (!schedulerCatchupApplied)
     {
         applyCatchupState();
-        catchupApplied = true;
+        schedulerCatchupApplied = true;
     }
 
     //==================================================
@@ -5495,13 +5526,13 @@ void executeRule(Rule &r, uint8_t ruleIndex)
     if (r.triggerType == RULE_TRIGGER_RELAY_STATE &&
         r.triggerSource < TOUCH_COUNT &&
         relayTimeDependent[r.triggerSource] &&
-        timeManager.quality != TIME_SYNCED)
+        !hasValidClock())
         return;
 
     if (r.conditionType == RULE_CONDITION_RELAY_STATE &&
         r.conditionSource < TOUCH_COUNT &&
         relayTimeDependent[r.conditionSource] &&
-        timeManager.quality != TIME_SYNCED)
+        !hasValidClock())
         return;
 
     bool triggerState = checkRuleTrigger(r);
