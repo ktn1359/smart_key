@@ -86,26 +86,29 @@ static bool cloudLocalPending[TOUCH_COUNT] = {false};
 // SMALL HTTP RESPONSE PARSER
 //======================================================
 
-static bool cloudHeaderNameEquals(const char* line, size_t nameLength,
-                                  const char* expected)
+static bool cloudTextEqualsIgnoreCase(const char* a, const char* b, size_t length)
 {
-    size_t expectedLength = strlen(expected);
-    if (nameLength != expectedLength)
-        return false;
-
-    for (size_t i = 0; i < nameLength; i++)
+    for (size_t i = 0; i < length; i++)
     {
-        char a = line[i];
-        char b = expected[i];
+        char ca = a[i];
+        char cb = b[i];
 
-        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb - 'A' + 'a');
 
-        if (a != b)
+        if (ca != cb)
             return false;
     }
 
     return true;
+}
+
+static bool cloudHeaderNameEquals(const char* line, size_t nameLength,
+                                  const char* expected)
+{
+    size_t expectedLength = strlen(expected);
+    return nameLength == expectedLength &&
+           cloudTextEqualsIgnoreCase(line, expected, nameLength);
 }
 
 static bool cloudParseHttpResponse()
@@ -146,7 +149,7 @@ static bool cloudParseHttpResponse()
                     value++;
 
                 if ((size_t)(lineEnd - value) >= 7 &&
-                    strncasecmp(value, "chunked", 7) == 0)
+                    cloudTextEqualsIgnoreCase(value, "chunked", 7))
                 {
                     cloudRequestFailed = true;
                     return false;
