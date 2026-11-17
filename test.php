@@ -151,6 +151,64 @@ function decimal_compare($a, $b)
     return strcmp($a, $b);
 }
 
+/*
+ * Shadow command journal for per-relay server commands.
+ * This is storage-only in this phase; the current POLL response is unchanged.
+ */
+function queue_relay_command_shadow(&$entry, $desired)
+{
+    if (!is_string($desired) || !preg_match('/^[01]{1,16}$/', $desired)) {
+        return false;
+    }
+
+    $next = (isset($entry['relay_next_version']) && is_array($entry['relay_next_version']))
+        ? $entry['relay_next_version']
+        : array();
+
+    $commands = (isset($entry['relay_commands']) && is_array($entry['relay_commands']))
+        ? $entry['relay_commands']
+        : array();
+
+    $now = time();
+
+    for ($ch = 0; $ch < strlen($desired); $ch++) {
+        $last = isset($next[$ch]) ? (int)$next[$ch] : 0;
+
+        // CMDVER is planned as uint32_t on the device. Never wrap around.
+        if ($last < 0 || $last >= 4294967295) {
+            return false;
+        }
+
+        $version = $last + 1;
+        $next[$ch] = $version;
+        $commands[$ch] = array(
+            'version'    => $version,
+            'state'      => (int)$desired[$ch],
+            'pending'    => true,
+            'created_at' => $now
+        );
+    }
+
+    $entry['relay_next_version'] = $next;
+    $entry['relay_commands'] = $commands;
+
+    return true;
+}
+
+function clear_relay_command_shadow(&$entry)
+{
+    if (!isset($entry['relay_commands']) || !is_array($entry['relay_commands'])) {
+        return;
+    }
+
+    foreach ($entry['relay_commands'] as $ch => $command) {
+        if (is_array($command)) {
+            $entry['relay_commands'][$ch]['pending'] = false;
+            $entry['relay_commands'][$ch]['cleared_at'] = time();
+        }
+    }
+}
+
 function is_valid_counter($counter)
 {
     if (!is_string($counter) ||
@@ -954,12 +1012,34 @@ function handle_admin_get()
 				'AGE=' . $age
 			);
 		}
-        $ok = json_update(STATE_FILE, function (array $all) use ($mac, $set) {
+        $versionError = false;
+        $ok = json_update(STATE_FILE, function (array $all) use ($mac, $set, &$versionError) {
             $entry = (isset($all[$mac]) && is_array($all[$mac])) ? $all[$mac] : array();
+
+            // Keep the legacy desired field until Firmware supports CMDVER.
             $entry['desired'] = ($set === 'clear') ? null : $set;
+
+            if ($set === 'clear') {
+                clear_relay_command_shadow($entry);
+            } else {
+                $reported = isset($entry['reported']) ? $entry['reported'] : '';
+                if (is_string($reported) &&
+                    preg_match('/^[01]{1,16}$/', $reported) &&
+                    strlen($reported) === strlen($set)) {
+                    if (!queue_relay_command_shadow($entry, $set)) {
+                        $versionError = true;
+                        return $all;
+                    }
+                }
+            }
+
             $all[$mac] = $entry;
             return $all;
         });
+
+        if ($versionError) {
+            fail(409, 'RELAY_VERSION_EXHAUSTED');
+        }
 
         if (!$ok) {
             fail(500, 'STORAGE_ERROR', 'FILE=state');
