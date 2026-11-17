@@ -1013,7 +1013,8 @@ function handle_admin_get()
 			);
 		}
         $versionError = false;
-        $ok = json_update(STATE_FILE, function (array $all) use ($mac, $set, &$versionError) {
+        $stateLengthError = false;
+        $ok = json_update(STATE_FILE, function (array $all) use ($mac, $set, &$versionError, &$stateLengthError) {
             $entry = (isset($all[$mac]) && is_array($all[$mac])) ? $all[$mac] : array();
 
             // Keep the legacy desired field until Firmware supports CMDVER.
@@ -1023,19 +1024,26 @@ function handle_admin_get()
                 clear_relay_command_shadow($entry);
             } else {
                 $reported = isset($entry['reported']) ? $entry['reported'] : '';
-                if (is_string($reported) &&
-                    preg_match('/^[01]{1,16}$/', $reported) &&
-                    strlen($reported) === strlen($set)) {
-                    if (!queue_relay_command_shadow($entry, $set)) {
-                        $versionError = true;
-                        return $all;
-                    }
+                if (!is_string($reported) ||
+                    !preg_match('/^[01]{1,16}$/', $reported) ||
+                    strlen($reported) !== strlen($set)) {
+                    $stateLengthError = true;
+                    return $all;
+                }
+
+                if (!queue_relay_command_shadow($entry, $set)) {
+                    $versionError = true;
+                    return $all;
                 }
             }
 
             $all[$mac] = $entry;
             return $all;
         });
+
+        if ($stateLengthError) {
+            fail(400, 'BAD_STATE_LENGTH');
+        }
 
         if ($versionError) {
             fail(409, 'RELAY_VERSION_EXHAUSTED');
