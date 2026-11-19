@@ -211,11 +211,31 @@ function queue_relay_command_shadow(&$entry, $desired)
         ? $entry['relay_commands']
         : array();
 
-    $now = time();
+    //$now = time();
 
-    for ($ch = 0; $ch < strlen($desired); $ch++) {
-        $last = isset($next[$ch]) ? (int)$next[$ch] : 0;
+    //for ($ch = 0; $ch < strlen($desired); $ch++) {
+        //$last = isset($next[$ch]) ? (int)$next[$ch] : 0;
+		$now = time();
 
+		$reported = isset($entry['reported'])
+			? $entry['reported']
+			: '';
+
+		if (!is_string($reported) ||
+			strlen($reported) !== strlen($desired) ||
+			!preg_match('/^[01]+$/', $reported)) {
+			return false;
+		}
+
+		for ($ch = 0; $ch < strlen($desired); $ch++) {
+
+			// فقط برای رله‌ای که وضعیتش تغییر می‌کند فرمان بساز.
+			if ($desired[$ch] === $reported[$ch]) {
+				continue;
+			}
+
+			$last = isset($next[$ch]) ? (int)$next[$ch] : 0;	
+			
         // CMDVER is planned as uint32_t on the device. Never wrap around.
         if ($last < 0 || $last >= 4294967295) {
             return false;
@@ -1038,6 +1058,7 @@ if (!empty($ackVersions)) {
 
 		respond(200, $responseBody);
 
+	
     // پاسخ ساده برای Firmware قدیمی که هنوز COUNTER نمی‌فرستد
     respond(200, $response);
 
