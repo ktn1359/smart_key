@@ -1277,7 +1277,13 @@ try {
         handle_admin_get();
     }
 } catch (Throwable $e) {
-    fail(500, 'EXCEPTION', 'MSG=' . clean_msg($e->getMessage()));
-} catch (Exception $e) {
-    fail(500, 'EXCEPTION', 'MSG=' . clean_msg($e->getMessage()));
+
+    error_log(
+        '[UNCAUGHT EXCEPTION] Class=' . get_class($e) .
+        ' Message=' . $e->getMessage() .
+        ' File=' . $e->getFile() .
+        ' Line=' . $e->getLine()
+    );
+
+    fail(500, 'EXCEPTION');
 }
