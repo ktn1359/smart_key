@@ -1038,8 +1038,6 @@ if (!empty($ackVersions)) {
 
 		respond(200, $responseBody);
 
-    }
-
     // پاسخ ساده برای Firmware قدیمی که هنوز COUNTER نمی‌فرستد
     respond(200, $response);
 
