@@ -1351,9 +1351,17 @@ function handle_admin_get()
 {
     $isAdmin = isset($_GET['set']) || isset($_GET['last']);
 
-    if ($isAdmin && ADMIN_KEY !== '' && (!isset($_GET['key']) || $_GET['key'] !== ADMIN_KEY)) {
-        fail(403, 'FORBIDDEN');
-    }
+		if ($isAdmin) {
+			if (
+				!is_string(ADMIN_KEY) ||
+				ADMIN_KEY === '' ||
+				!isset($_GET['key']) ||
+				!is_string($_GET['key']) ||
+				!hash_equals(ADMIN_KEY, $_GET['key'])
+			) {
+				fail(403, 'FORBIDDEN');
+			}
+		}
 
     if (isset($_GET['set'])) {
         $mac = isset($_GET['mac']) ? strtoupper(trim($_GET['mac'])) : '';
