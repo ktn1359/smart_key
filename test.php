@@ -200,7 +200,7 @@
  * تگ پایانی PHP عمداً استفاده نشده تا خروجی ناخواسته
  * وارد پاسخ HTTP نشود.
  */
-define('ALLOW_LEGACY_POST', true);
+define('ALLOW_LEGACY_POST', false);
 
 error_reporting(E_ALL);
 date_default_timezone_set('Asia/Tehran');
@@ -1349,118 +1349,16 @@ if (!empty($ackVersions)) {
 // ---------------------------------------------------------------------
 function handle_admin_get()
 {
-    $isAdmin = isset($_GET['set']) || isset($_GET['last']);
-
-		if ($isAdmin) {
-			if (
-				!is_string(ADMIN_KEY) ||
-				ADMIN_KEY === '' ||
-				!isset($_GET['key']) ||
-				!is_string($_GET['key']) ||
-				!hash_equals(ADMIN_KEY, $_GET['key'])
-			) {
-				fail(403, 'FORBIDDEN');
-			}
-		}
-
-    if (isset($_GET['set'])) {
-        $mac = isset($_GET['mac']) ? strtoupper(trim($_GET['mac'])) : '';
-        $set = trim($_GET['set']);
-
-        if (!preg_match('/^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/', $mac)) {
-            fail(400, 'BAD_MAC');
-        }
-
-        if ($set !== 'clear' && !preg_match('/^[01]{1,16}$/', $set)) {
-            fail(400, 'BAD_STATE');
-        }
-		$stateRaw = @file_get_contents(STATE_FILE);
-		$allState = ($stateRaw !== false && $stateRaw !== '')
-			? json_decode($stateRaw, true)
-			: array();
-
-		$entry = (isset($allState[$mac]) &&
-				  is_array($allState[$mac]))
-			? $allState[$mac]
-			: array();
-
-		$lastSeen = isset($entry['last_seen'])
-			? (int)$entry['last_seen']
-			: 0;
-
-		$age = ($lastSeen > 0)
-			? max(0, time() - $lastSeen)
-			: -1;
-
-		if ($age < 0 || $age > 20) {
-			fail(
-				409,
-				'DEVICE_STALE',
-				'AGE=' . $age
-			);
-		}
-        $versionError = false;
-        $stateLengthError = false;
-        $ok = json_update(STATE_FILE, function (array $all) use ($mac, $set, &$versionError, &$stateLengthError) {
-            $entry = (isset($all[$mac]) && is_array($all[$mac])) ? $all[$mac] : array();
-
-            // Keep the legacy desired field until Firmware supports CMDVER.
-            $entry['desired'] = ($set === 'clear') ? null : $set;
-
-            if ($set === 'clear') {
-                clear_relay_command_shadow($entry);
-            } else {
-                $reported = isset($entry['reported']) ? $entry['reported'] : '';
-                if (!is_string($reported) ||
-                    !preg_match('/^[01]{1,16}$/', $reported) ||
-                    strlen($reported) !== strlen($set)) {
-                    $stateLengthError = true;
-                    return $all;
-                }
-
-                if (!queue_relay_command_shadow($entry, $set)) {
-                    $versionError = true;
-                    return $all;
-                }
-            }
-
-            $all[$mac] = $entry;
-            return $all;
-        });
-
-        if ($stateLengthError) {
-            fail(400, 'BAD_STATE_LENGTH');
-        }
-
-        if ($versionError) {
-            fail(409, 'RELAY_VERSION_EXHAUSTED');
-        }
-
-        if (!$ok) {
-            fail(500, 'STORAGE_ERROR', 'FILE=state');
-        }
-
-        respond(200, 'OK;SET=' . $set . ';MAC=' . $mac);
+    // مسیرهای قدیمی مدیریت دیگر مجاز نیستند.
+    if (isset($_GET['set']) || isset($_GET['last'])) {
+        fail(403, 'ADMIN_ROUTE_DISABLED');
     }
 
-    if (isset($_GET['last'])) {
-        $raw = @file_get_contents(HISTORY_FILE);
-        $h   = ($raw !== false && $raw !== '') ? json_decode($raw, true) : array();
-
-        if (!is_array($h) || count($h) === 0) {
-            fail(404, 'NO_HISTORY');
-        }
-
-        http_response_code(200);
-        header('Content-Type: application/json; charset=UTF-8');
-        header('Cache-Control: no-store');
-        echo json_encode($h[0], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-        exit;
-    }
-
-    respond(200, 'OK;test.php;POST a Key-Value status packet here');
+    respond(
+        200,
+        'OK;test.php;POST a signed device packet here'
+    );
 }
-
 // ---------------------------------------------------------------------
 // نقطه‌ی ورود
 // ---------------------------------------------------------------------

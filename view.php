@@ -1,4 +1,7 @@
 <?php
+require_once __DIR__ . '/admin_auth.php';
+admin_require_login();
+
 // view.php - Dashboard to view received packets
 date_default_timezone_set('Asia/Tehran');
 
@@ -46,12 +49,12 @@ function bits_to_hex($bits)
 
     return $hex;
 }
-// اکشن پاکسازی تاریخچه
+/*// اکشن پاکسازی تاریخچه
 if (isset($_POST['clear_history'])) {
     @file_put_contents($storageFile, json_encode([]));
     header("Location: view.php");
     exit;
-}
+}*/
 ?>
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
@@ -96,9 +99,31 @@ if (isset($_POST['clear_history'])) {
         <h2>سیستم مانیتورینگ بسته‌های KP-4000 (تعداد کل: <?= count($history) ?>)</h2>
         <div>
             <a href="view.php" class="btn btn-reload">بروزرسانی 🔄</a>
-            <form method="POST" style="display:inline;" onsubmit="return confirm('تاریخچه پاک شود؟');">
-                <button type="submit" name="clear_history" value="1" class="btn btn-clear">پاک کردن لاگ</button>
-            </form>
+				 <form method="POST"
+					  action="admin_action.php"
+					  style="display:inline;"
+					  onsubmit="return confirm('تاریخچه پاک شود؟');">
+
+					<input type="hidden" name="action" value="clear_history">
+
+					<input type="hidden"
+						   name="csrf_token"
+						   value="<?= htmlspecialchars(admin_csrf_token(), ENT_QUOTES, 'UTF-8') ?>">
+
+					<button type="submit" class="btn btn-clear">
+						پاک کردن لاگ
+					</button>
+				</form>
+				<form method="POST" action="logout.php" style="display:inline;">
+
+					<input type="hidden"
+						   name="csrf_token"
+						   value="<?= htmlspecialchars(admin_csrf_token(), ENT_QUOTES, 'UTF-8') ?>">
+
+					<button type="submit" class="btn btn-reload">
+						خروج مدیر
+					</button>
+				</form>
         </div>
     </div>
 	<?php foreach ($deviceStates as $mac => $device): ?>
@@ -153,6 +178,55 @@ if (isset($_POST['clear_history'])) {
 				زمان سپری‌شده:
 				<?= $age >= 0 ? $age . ' ثانیه' : '-' ?>
 			</div>
+			<form method="POST" action="admin_action.php"
+				  style="margin-top:15px;">
+
+				<input type="hidden" name="action" value="set">
+
+				<input type="hidden"
+					   name="mac"
+					   value="<?= htmlspecialchars($mac, ENT_QUOTES, 'UTF-8') ?>">
+
+				<input type="hidden"
+					   name="csrf_token"
+					   value="<?= htmlspecialchars(admin_csrf_token(), ENT_QUOTES, 'UTF-8') ?>">
+
+				<label>وضعیت درخواستی رله‌ها (از چپ به راست):</label>
+
+				<input
+					type="text"
+					name="state"
+					value="<?= htmlspecialchars(
+						isset($device['reported']) ? $device['reported'] : '',
+						ENT_QUOTES,
+						'UTF-8'
+					) ?>"
+					pattern="[01]{1,16}"
+					maxlength="16"
+					required
+					style="direction:ltr; width:150px; padding:7px;"
+				>
+
+				<button type="submit" class="btn btn-reload">
+					ارسال فرمان
+				</button>
+			</form>
+			<form method="POST" action="admin_action.php"
+				  style="display:inline;">
+
+				<input type="hidden" name="action" value="clear">
+
+				<input type="hidden"
+					   name="mac"
+					   value="<?= htmlspecialchars($mac, ENT_QUOTES, 'UTF-8') ?>">
+			<input type="hidden"
+					   name="csrf_token"
+					   value="<?= htmlspecialchars(admin_csrf_token(), ENT_QUOTES, 'UTF-8') ?>">
+
+				<button type="submit" class="btn btn-clear">
+					لغو فرمان معوق
+				</button>
+			</form>
 		</div>
 
 	<?php endforeach; ?>
