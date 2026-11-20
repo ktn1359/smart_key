@@ -191,7 +191,7 @@ if (isset($_POST['clear_history'])) {
                         <span class="badge badge-time">زمان دریافت: <?= $row['received_at'] ?></span>
                     </div>
                 </div>
-//
+
 
 
 			<!-- وضعیت رله‌ها -->
@@ -212,7 +212,7 @@ if (isset($_POST['clear_history'])) {
 					<?php endfor; ?>
 				</div>
 			</div>
-//
+
 			<!-- وضعیت تاچ‌ها -->
 			<div class="io-box">
 				<h4>
@@ -231,7 +231,7 @@ if (isset($_POST['clear_history'])) {
 					<?php endfor; ?>
 				</div>
 			</div>
-//
+
                 <!-- جدول تایمرها -->
                 <?php if (!empty($row['timers'])): ?>
                     <details>

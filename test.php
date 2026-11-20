@@ -739,7 +739,7 @@ if (!isset($post['STATE']) ||
 
 			$response = $reported;
 			$all[$mac] = $entry;
-//
+
             return $all;
         }
     );
