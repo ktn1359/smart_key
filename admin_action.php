@@ -1,6 +1,6 @@
 <?php
 
-require_once DIR . '/admin_auth.php';
+require_once __DIR__ . '/admin_auth.php';
 
 admin_require_login();
 
@@ -11,8 +11,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 admin_verify_csrf();
 
-define('ADMIN_STATE_FILE', DIR . '/devices_state.json');
-define('ADMIN_HISTORY_FILE', DIR . '/packets_history.json');
+define('ADMIN_STATE_FILE', __DIR__ . '/devices_state.json');
+define('ADMIN_HISTORY_FILE', __DIR__ . '/packets_history.json');
 
 function admin_json_update($file, $callback)
 {
