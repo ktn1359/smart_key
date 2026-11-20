@@ -23,6 +23,29 @@ if (file_exists($storageFile)) {
     }
 }
 
+// تبدیل آرایه وضعیت کانال‌ها به بایت‌های HEX
+// ترتیب بیت‌ها مطابق بسته دستگاه است: کانال اول = بیت صفر
+function bits_to_hex($bits)
+{
+    if (!is_array($bits) || empty($bits)) {
+        return '-';
+    }
+
+    $hex = '';
+    $count = count($bits);
+
+    for ($offset = 0; $offset < $count; $offset += 8) {
+        $byte = 0;
+
+        for ($bit = 0; $bit < 8 && ($offset + $bit) < $count; $bit++) {
+            $byte |= (((int)$bits[$offset + $bit] & 1) << $bit);
+        }
+
+        $hex .= sprintf('%02X', $byte);
+    }
+
+    return $hex;
+}
 // اکشن پاکسازی تاریخچه
 if (isset($_POST['clear_history'])) {
     @file_put_contents($storageFile, json_encode([]));
@@ -134,9 +157,30 @@ if (isset($_POST['clear_history'])) {
 
 	<?php endforeach; ?>
     <?php if (empty($history)): ?>
-        <div class="card empty">هنوز بسته‌ای دریافت نشده است.</div>
-    <?php else: ?>
-        <?php foreach ($history as $idx => $row): ?>
+			<div class="card empty">هنوز بسته‌ای دریافت نشده است.</div>
+						<?php else: ?>
+							<?php foreach ($history as $idx => $row): ?>
+							<?php
+						$relayCount = isset($row['relay_count'])
+							? (int)$row['relay_count']
+							: (isset($row['relays']) && is_array($row['relays'])
+								? count($row['relays'])
+								: 8);
+
+						$touchCount = isset($row['touch_count'])
+							? (int)$row['touch_count']
+							: (isset($row['touches']) && is_array($row['touches'])
+								? count($row['touches'])
+								: 8);
+
+						$relayRawHex = isset($row['relay_raw_hex'])
+							? $row['relay_raw_hex']
+							: bits_to_hex($row['relays'] ?? []);
+
+						$touchRawHex = isset($row['touch_raw_hex'])
+							? $row['touch_raw_hex']
+							: bits_to_hex($row['touches'] ?? []);
+					?>
             <div class="card">
                 <div class="card-top">
                     <div>
@@ -147,37 +191,47 @@ if (isset($_POST['clear_history'])) {
                         <span class="badge badge-time">زمان دریافت: <?= $row['received_at'] ?></span>
                     </div>
                 </div>
+//
 
-                <div class="io-container">
-                    <!-- وضعیت رله‌ها -->
-                    <div class="io-box">
-                        <h4>وضعیت رله‌ها (بایت وضعیت: 0x<?= sprintf('%02X', $row['relay_byte']) ?>)</h4>
-                        <div class="bits-grid">
-                            <?php for ($r = 0; $r < 8; $r++): 
-                                $isOn = !empty($row['relays'][$r]);
-                            ?>
-                                <div class="bit <?= $isOn ? 'bit-on' : 'bit-off' ?>">
-                                    R<?= $r + 1 ?><br><?= $isOn ? 'ON' : 'OFF' ?>
-                                </div>
-                            <?php endfor; ?>
-                        </div>
-                    </div>
 
-                    <!-- وضعیت تاچ‌ها -->
-                    <div class="io-box">
-                        <h4>وضعیت تاچ‌ها (بایت وضعیت: 0x<?= sprintf('%02X', $row['touch_byte']) ?>)</h4>
-                        <div class="bits-grid">
-                            <?php for ($t = 0; $t < 8; $t++): 
-                                $isTouch = !empty($row['touches'][$t]);
-                            ?>
-                                <div class="bit <?= $isTouch ? 'bit-on' : 'bit-off' ?>">
-                                    T<?= $t + 1 ?><br><?= $isTouch ? '1' : '0' ?>
-                                </div>
-                            <?php endfor; ?>
-                        </div>
-                    </div>
-                </div>
+			<!-- وضعیت رله‌ها -->
+			<div class="io-box">
+				<h4>
+					وضعیت رله‌ها
+					(بایت وضعیت: 0x<?= htmlspecialchars($relayRawHex) ?>)
+				</h4>
 
+				<div class="bits-grid">
+					<?php for ($r = 0; $r < $relayCount; $r++):
+						$isOn = !empty($row['relays'][$r]);
+					?>
+						<div class="bit <?= $isOn ? 'bit-on' : 'bit-off' ?>">
+							R<?= $r + 1 ?><br>
+							<?= $isOn ? 'ON' : 'OFF' ?>
+						</div>
+					<?php endfor; ?>
+				</div>
+			</div>
+//
+			<!-- وضعیت تاچ‌ها -->
+			<div class="io-box">
+				<h4>
+					وضعیت تاچ‌ها
+					(بایت وضعیت: 0x<?= htmlspecialchars($touchRawHex) ?>)
+				</h4>
+
+				<div class="bits-grid">
+					<?php for ($t = 0; $t < $touchCount; $t++):
+						$isTouch = !empty($row['touches'][$t]);
+					?>
+						<div class="bit <?= $isTouch ? 'bit-on' : 'bit-off' ?>">
+							T<?= $t + 1 ?><br>
+							<?= $isTouch ? '1' : '0' ?>
+						</div>
+					<?php endfor; ?>
+				</div>
+			</div>
+//
                 <!-- جدول تایمرها -->
                 <?php if (!empty($row['timers'])): ?>
                     <details>
