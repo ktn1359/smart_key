@@ -2761,9 +2761,10 @@ bool requestOk =
 
 void initCloudAPI()
 {
+    cloudLoadServerConfig();
+
     cloudLoadEventFlags();
-        cloudLoadEventFlags();
-        
+
     if (!cloudCommandJournalInit())
     {
         DBG_PRINTLN("[Cloud] Command Journal initialization FAILED");
