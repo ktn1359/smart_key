@@ -61,10 +61,21 @@ function conv(h,m,s,dir){let t=h*60+m+dir*OFF,ds=Math.floor(t/1440);t-=ds*1440;r
 function hms(pfx){return(+($(pfx+'h').value||0))*3600+(+($(pfx+'m').value||0))*60+(+($(pfx+'s').value||0));}
 function fillHms(pfx,sec){sec=sec||0;$(pfx+'h').value=Math.floor(sec/3600);$(pfx+'m').value=Math.floor((sec%3600)/60);$(pfx+'s').value=sec%60;}
 
-function toggleRelay(c){fetch('/toggle?ch='+c).then(update);}
-let clientTimeSent=false;
+// function toggleRelay(c){fetch('/toggle?ch='+c).then(update);}
+// let clientTimeSent=false;
+// function update(){
+//  if(!clientTimeSent){clientTimeSent=true;fetch('/timesync?utc='+Math.floor(Date.now()/1000)).catch(()=>{});}
+//  fetch('/status').then(r=>r.json()).then(d=>{
+  function syncDeviceTime(){
+ fetch('/timesync?utc='+Math.floor(Date.now()/1000)).catch(()=>{});
+}
+
+function toggleRelay(c){
+ syncDeviceTime();
+ fetch('/toggle?ch='+c).then(update);
+}
+
 function update(){
- if(!clientTimeSent){clientTimeSent=true;fetch('/timesync?utc='+Math.floor(Date.now()/1000)).catch(()=>{});}
  fetch('/status').then(r=>r.json()).then(d=>{
   let b=document.getElementsByClassName('btn');
   for(let i=0;i<NR;i++){
@@ -73,9 +84,13 @@ function update(){
   }
  }).catch(()=>{});
 }
+// setInterval(update,300);
+// window.onload=update;
 setInterval(update,300);
-window.onload=update;
-
+window.onload=()=>{
+ syncDeviceTime();
+ update();
+};
 // ---- ساعت خود دستگاه (از ماژول خوانده می‌شود، نه از مرورگر) ----
 const QN=['UNAVAILABLE','ESTIMATED','SYNCED'],SN=['NONE','Client','NTP'],QC=['#c0392b','#e67e22','#27ae60'];
 function fmt(d){return d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1)+'-'+pad(d.getUTCDate())+' '+pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+':'+pad(d.getUTCSeconds());}
