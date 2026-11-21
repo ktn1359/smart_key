@@ -92,9 +92,181 @@ static bool cloudHMACTest()
 // SERVER
 //======================================================
 
-static const char* CLOUD_HOST = "net-io.ir"; //"hoolhelpsc.ir";
+//======================================================
+// SERVER CONFIGURATION
+//======================================================
+
+#define CLOUD_SERVER_CONFIG_FILE "/cloud_server.cfg"
+#define CLOUD_HOST_MAX_LENGTH 63
+
+static const char CLOUD_DEFAULT_HOST[] = "net-io.ir";
+
+static char cloudHost[CLOUD_HOST_MAX_LENGTH + 1] = "net-io.ir";
+
 static const uint16_t CLOUD_PORT = 80;
 static const char* CLOUD_STATUS_PATH = "/kp4000/test.php";
+
+//======================================================
+// CLOUD SERVER HOST VALIDATION
+//======================================================
+
+static bool cloudValidateHost(const char* host)
+{
+    if (host == nullptr)
+        return false;
+
+    size_t length = strlen(host);
+
+    if (length == 0 || length > CLOUD_HOST_MAX_LENGTH)
+        return false;
+
+    // Reject URL schemes, paths, ports, spaces and special characters.
+    for (size_t i = 0; i < length; i++)
+    {
+        char c = host[i];
+
+        bool valid =
+            (c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') ||
+            c == '.' ||
+            c == '-';
+
+        if (!valid)
+            return false;
+    }
+
+    // A host cannot start or end with a dot or hyphen.
+    if (host[0] == '.' || host[0] == '-')
+        return false;
+
+    if (host[length - 1] == '.' ||
+        host[length - 1] == '-')
+        return false;
+
+    // Validate individual domain labels.
+    size_t labelLength = 0;
+
+    for (size_t i = 0; i <= length; i++)
+    {
+        if (host[i] == '.' || host[i] == '\0')
+        {
+            if (labelLength == 0 || labelLength > 63)
+                return false;
+
+            if (host[i - 1] == '-')
+                return false;
+
+            labelLength = 0;
+        }
+        else
+        {
+            if (labelLength == 0 && host[i] == '-')
+                return false;
+
+            labelLength++;
+        }
+    }
+
+    return true;
+}
+
+//======================================================
+// LOAD CLOUD SERVER CONFIGURATION
+//======================================================
+
+static bool cloudLoadServerConfig()
+{
+    File file = LittleFS.open(CLOUD_SERVER_CONFIG_FILE, "r");
+
+    if (!file)
+    {
+        strcpy(cloudHost, CLOUD_DEFAULT_HOST);
+
+        DBG_PRINTLN("[Cloud] Server config not found; using default");
+
+        return false;
+    }
+
+    char loadedHost[CLOUD_HOST_MAX_LENGTH + 1] = {0};
+
+    size_t length = file.readBytesUntil(
+        '\n',
+        loadedHost,
+        CLOUD_HOST_MAX_LENGTH + 1
+    );
+
+    file.close();
+
+    if (length == 0 ||
+        length > CLOUD_HOST_MAX_LENGTH)
+    {
+        DBG_PRINTLN("[Cloud] Invalid server config");
+
+        return false;
+    }
+
+    loadedHost[length] = '\0';
+
+    // Remove optional carriage return.
+    if (length > 0 && loadedHost[length - 1] == '\r')
+        loadedHost[length - 1] = '\0';
+
+    if (!cloudValidateHost(loadedHost))
+    {
+        DBG_PRINTLN("[Cloud] Invalid saved host");
+
+        return false;
+    }
+
+    strcpy(cloudHost, loadedHost);
+DBG_PRINT("[Cloud] Server Host loaded: ");
+    DBG_PRINTLN(cloudHost);
+
+    return true;
+}
+
+//======================================================
+// SAVE CLOUD SERVER HOST
+//======================================================
+
+static bool cloudSaveServerHost(const char* host)
+{
+    if (!cloudValidateHost(host))
+        return false;
+
+    File file = LittleFS.open(CLOUD_SERVER_CONFIG_FILE, "w");
+
+    if (!file)
+    {
+        DBG_PRINTLN("[Cloud] Cannot open server config");
+
+        return false;
+    }
+
+    size_t length = strlen(host);
+
+    size_t written = file.write(
+        (const uint8_t*)host,
+        length
+    );
+
+    file.close();
+
+    if (written != length)
+    {
+        DBG_PRINTLN("[Cloud] Server config write FAILED");
+
+        return false;
+    }
+
+    strcpy(cloudHost, host);
+
+    DBG_PRINT("[Cloud] Server Host saved: ");
+    DBG_PRINTLN(cloudHost);
+
+    return true;
+}
 
 
 //======================================================
@@ -2095,7 +2267,7 @@ static void cloudOnConnect(void* arg, AsyncClient* client)
         "Content-Length: %u\r\n"
         "\r\n",
         cloudRequestPath,
-        CLOUD_HOST,
+        cloudHost,
         (unsigned int)cloudReportTextLength
     );
 
@@ -2258,7 +2430,7 @@ static bool cloudStartRequest(
     cloudRequestInFlight = true;
     cloudRequestStartedAt = millis();
 
-    if (!cloudClient.connect(CLOUD_HOST, CLOUD_PORT))
+    if (!cloudClient.connect(cloudHost, CLOUD_PORT))
     {
         cloudRequestInFlight = false;
         cloudRequestDone = true;
@@ -2590,6 +2762,8 @@ bool requestOk =
 void initCloudAPI()
 {
     cloudLoadEventFlags();
+        cloudLoadEventFlags();
+        
     if (!cloudCommandJournalInit())
     {
         DBG_PRINTLN("[Cloud] Command Journal initialization FAILED");
