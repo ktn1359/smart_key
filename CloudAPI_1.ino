@@ -3082,16 +3082,19 @@ bool requestOk =
 
             requestOk = cloudGetResponseBody(response);
 
-            if (requestOk)
-            {
-                requestOk = cloudValidateSignedResponse(
-                    response,
-                    cloudRequestCounterText,
-                    relayResponse,
-                    commandVersions);
+              if (requestOk)
+              {
+                  requestOk = cloudValidateSignedResponse(
+                      response,
+                      cloudRequestCounterText,
+                      relayResponse,
+                      commandVersions);
 
-                    cloudServerTestState = CLOUD_SERVER_CONNECTED;
-            }
+                  if (requestOk)
+                  {
+                      cloudServerTestState = CLOUD_SERVER_CONNECTED;
+                  }
+              }
 
             if (requestOk)
                 response = relayResponse;
