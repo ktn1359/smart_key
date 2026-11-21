@@ -1522,6 +1522,9 @@ static bool cloudValidateSignedResponse(
         commandVersions == nullptr)
         return false;
 
+    // Exact format:
+    // COUNTER=...&RELAY=...&CMDVER=...&SIGNATURE=...
+
     int p1 = body.indexOf('&');
     if (p1 <= 0)
         return false;
@@ -1529,43 +1532,30 @@ static bool cloudValidateSignedResponse(
     int p2 = body.indexOf('&', p1 + 1);
     if (p2 <= p1 + 1)
         return false;
-
     int p3 = body.indexOf('&', p2 + 1);
+    if (p3 <= p2 + 1)
+        return false;
+
+    if (body.indexOf('&', p3 + 1) >= 0)
+        return false;
 
     String counterField = body.substring(0, p1);
     String relayField = body.substring(p1 + 1, p2);
-
-    String cmdverText;
-    String signatureField;
-    bool hasCmdver = (p3 >= 0);
-
-    if (hasCmdver)
-    {
-        if (body.indexOf('&', p3 + 1) >= 0)
-            return false;
-
-        String cmdverField = body.substring(p2 + 1, p3);
-        signatureField = body.substring(p3 + 1);
-
-        if (!cmdverField.startsWith("CMDVER="))
-            return false;
-
-        cmdverText = cmdverField.substring(7);
-    }
-    else
-    {
-        signatureField = body.substring(p2 + 1);
-    }
+    String cmdverField = body.substring(p2 + 1, p3);
+    String signatureField = body.substring(p3 + 1);
 
     if (!counterField.startsWith("COUNTER=") ||
         !relayField.startsWith("RELAY=") ||
+        !cmdverField.startsWith("CMDVER=") ||
         !signatureField.startsWith("SIGNATURE="))
         return false;
 
     String receivedCounter = counterField.substring(8);
     relayResponse = relayField.substring(6);
+    String cmdverText = cmdverField.substring(7);
     String signatureHex = signatureField.substring(10);
 
+    // COUNTER validation
     if (receivedCounter.length() == 0 ||
         receivedCounter.length() > 20 ||
         receivedCounter != expectedCounter)
@@ -1582,6 +1572,7 @@ static bool cloudValidateSignedResponse(
         receivedCounter[0] == '0')
         return false;
 
+    // RELAY validation
     if (relayResponse.length() != TOUCH_COUNT)
         return false;
 
@@ -1594,54 +1585,57 @@ static bool cloudValidateSignedResponse(
         commandVersions[i] = 0;
     }
 
-    // Parse CMDVER: comma-separated uint32 decimal values.
-    if (hasCmdver)
+    // CMDVER is mandatory.
+    // Parse exactly TOUCH_COUNT comma-separated uint32 values.
+
+    int start = 0;
+
+    for (uint8_t i = 0; i < TOUCH_COUNT; i++)
     {
-        int start = 0;
+        int comma = cmdverText.indexOf(',', start);
 
-        for (uint8_t i = 0; i < TOUCH_COUNT; i++)
+        int end = (i == TOUCH_COUNT - 1)
+            ? cmdverText.length()
+            : comma;
+
+        if (end < 0 ||
+            (i < TOUCH_COUNT - 1 && comma < 0))
+            return false;
+
+        if (i == TOUCH_COUNT - 1 && comma >= 0)
+            return false;
+
+        String value = cmdverText.substring(start, end);
+
+        if (value.length() == 0 || value.length() > 10)
+            return false;
+
+        uint32_t parsed = 0;
+
+        for (size_t j = 0; j < value.length(); j++)
         {
-            int comma = cmdverText.indexOf(',', start);
-            int end = (i == TOUCH_COUNT - 1)
-                ? cmdverText.length()
-                : comma;
+            char c = value[j];
 
-            if (end < 0 || (i < TOUCH_COUNT - 1 && comma < 0))
+            if (c < '0' || c > '9')
                 return false;
 
-            if (i == TOUCH_COUNT - 1 && comma >= 0)
+            uint8_t digit = (uint8_t)(c - '0');
+
+            if (parsed > (0xFFFFFFFFUL - digit) / 10UL)
                 return false;
 
-            String value = cmdverText.substring(start, end);
-
-            if (value.length() == 0 || value.length() > 10)
-                return false;
-
-            uint32_t parsed = 0;
-
-            for (size_t j = 0; j < value.length(); j++)
-            {
-                char c = value[j];
-
-                if (c < '0' || c > '9')
-                    return false;
-
-                uint8_t digit = (uint8_t)(c - '0');
-
-                if (parsed > (0xFFFFFFFFUL - digit) / 10UL)
-                    return false;
-
-                parsed = parsed * 10UL + digit;
-            }
-
-            if (value.length() > 1 && value[0] == '0')
-                return false;
-
-            commandVersions[i] = parsed;
-            start = end + 1;
+            parsed = parsed * 10UL + digit;
         }
+
+        if (value.length() > 1 && value[0] == '0')
+            return false;
+
+        commandVersions[i] = parsed;
+
+        start = end + 1;
     }
 
+    // SIGNATURE validation
     if (signatureHex.length() != 64)
         return false;
 
@@ -1659,22 +1653,27 @@ static bool cloudValidateSignedResponse(
             (uint8_t)((hi << 4) | lo);
     }
 
+    // Build signed response:
+    // SERVER_TO_DEVICE + NUL
+    // + COUNTER + NUL
+    // + RELAY + NUL
+    // + CMDVER
+
     static const uint8_t domain[] = "SERVER_TO_DEVICE";
 
-    uint8_t signedData[128];
+    uint8_t signedData[256];
     size_t offset = 0;
-  const size_t domainLength = sizeof(domain) - 1U;
+
+    const size_t domainLength = sizeof(domain) - 1U;
     const size_t counterLength = receivedCounter.length();
     const size_t relayLength = relayResponse.length();
-    const size_t cmdverLength = hasCmdver ? cmdverText.length() : 0;
+    const size_t cmdverLength = cmdverText.length();
 
     size_t required =
         domainLength + 1U +
         counterLength + 1U +
-        relayLength;
-
-    if (hasCmdver)
-        required += 1U + cmdverLength;
+        relayLength + 1U +
+        cmdverLength;
 
     if (required > sizeof(signedData))
         return false;
@@ -1684,27 +1683,29 @@ static bool cloudValidateSignedResponse(
 
     signedData[offset++] = 0;
 
-    memcpy(signedData + offset,
-           receivedCounter.c_str(),
-           counterLength);
+    memcpy(
+        signedData + offset,
+        receivedCounter.c_str(),
+        counterLength
+    );
     offset += counterLength;
 
     signedData[offset++] = 0;
-
-    memcpy(signedData + offset,
-           relayResponse.c_str(),
-           relayLength);
+    memcpy(
+        signedData + offset,
+        relayResponse.c_str(),
+        relayLength
+    );
     offset += relayLength;
 
-    if (hasCmdver)
-    {
-        signedData[offset++] = 0;
+    signedData[offset++] = 0;
 
-        memcpy(signedData + offset,
-               cmdverText.c_str(),
-               cmdverLength);
-        offset += cmdverLength;
-    }
+    memcpy(
+        signedData + offset,
+        cmdverText.c_str(),
+        cmdverLength
+    );
+    offset += cmdverLength;
 
     uint8_t calculatedSignature[32];
 
@@ -1713,7 +1714,8 @@ static bool cloudValidateSignedResponse(
         CLOUD_SECRET_SIZE,
         signedData,
         offset,
-        calculatedSignature);
+        calculatedSignature
+    );
 
     memset(signedData, 0, sizeof(signedData));
 
@@ -1810,10 +1812,10 @@ static void cloudDebugDumpRx()
     }
     DBG_PRINTLN("");
 
-     DBG_PRINTLN("--- FULL RESPONSE HEX ---");
+    //  DBG_PRINTLN("--- FULL RESPONSE HEX ---");
     //  cloudDebugPrintHex((const uint8_t *)cloudRxBuffer, cloudRxLength);
 
-    DBG_PRINTLN("--- FULL RESPONSE URL-ENCODED ---");
+    // DBG_PRINTLN("--- FULL RESPONSE URL-ENCODED ---");
     // cloudDebugPrintUrlEncoded((const uint8_t *)cloudRxBuffer, cloudRxLength);
 
     DBG_PRINTLN("=============================");

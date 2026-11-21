@@ -648,22 +648,20 @@ function parse_packet($raw)
 
 	$timerCount = ord($raw[$countOffset]);
 
-	$legacyExpected = $headerLen + ($timerCount * 12);
-	$newExpected = $legacyExpected + ($relayCount * 4);
+		$legacyExpected = $headerLen + ($timerCount * 12);
+		$newExpected = $legacyExpected + ($relayCount * 4);
 
-	$hasAckVersion = false;
-
-	if ($len === $newExpected) {
+		// Final protocol: ACKVER is mandatory.
 		$hasAckVersion = true;
-	} elseif ($len !== $legacyExpected) {
-		fail(
-			400,
-			'BAD_LENGTH',
-			'LEGACY=' . $legacyExpected .
-			';NEW=' . $newExpected .
-			';RECEIVED=' . $len
-		);
-	}
+
+		if ($len !== $newExpected) {
+			fail(
+				400,
+				'BAD_LENGTH',
+				'EXPECTED=' . $newExpected .
+				';RECEIVED=' . $len
+			);
+		}
 
     $relays  = bitmap_to_array($raw, $relayOffset, $relayCount);
     $touches = bitmap_to_array($raw, $touchOffset, $touchCount);
@@ -904,25 +902,33 @@ if (!isset($post['STATE']) ||
 			fail(409, 'REPLAY_OR_STALE_COUNTER');
 		}
 
-    // پاسخ امضاشده با همان قرارداد POLL
-    $responseSigningData =
-        "SERVER_TO_DEVICE" . "\0" .
-        $counter . "\0" .
-        $response;
+		// Final signed response: COUNTER + RELAY + CMDVER
 
-    $responseSignature = hash_hmac(
-        'sha256',
-        $responseSigningData,
-        $secret,
-        true
-    );
+		$cmdverText = implode(
+			',',
+			array_fill(0, strlen($response), '0')
+		);
 
-    $responseBody =
-        'COUNTER=' . $counter .
-        '&RELAY=' . $response .
-        '&SIGNATURE=' . strtoupper(bin2hex($responseSignature));
+		$responseSigningData =
+			"SERVER_TO_DEVICE" . "\0" .
+			$counter . "\0" .
+			$response . "\0" .
+			$cmdverText;
 
-    respond(200, $responseBody);
+		$responseSignature = hash_hmac(
+			'sha256',
+			$responseSigningData,
+			$secret,
+			true
+		);
+
+		$responseBody =
+			'COUNTER=' . $counter .
+			'&RELAY=' . $response .
+			'&CMDVER=' . $cmdverText .
+			'&SIGNATURE=' . strtoupper(bin2hex($responseSignature));
+
+		respond(200, $responseBody);
 }
 
 
@@ -1019,30 +1025,26 @@ function handle_device_post()
         $timersRaw .= $readHex($field, 12);
     }
 
-		$hasAckVer = isset($post['ACKVER']);
+		// Final protocol: ACKVER is mandatory ACKVERی کردن کانتر
+		if (!isset($post['ACKVER'])) {
+			fail(400, 'ACKVER_REQUIRED');
+		}
 
-		$ackRaw = '';
-
-		if ($hasAckVer) {
-			$ackRaw = $readHex('ACKVER', $relayCount * 4);
-		  }
+		$ackRaw = $readHex('ACKVER', $relayCount * 4);
+		$hasAckVer = true;
 
     // دریافت امضای HMAC و تشخیص نسخه پروتکل
     $signature = $readHex('SIGNATURE', 32);
 
-    $useCounter = array_key_exists('COUNTER', $post);
-    $counter = null;
+		// Final protocol: COUNTER is mandatory. اجباری کردن کانتر
+		if (!isset($post['COUNTER']) ||
+			!is_valid_counter($post['COUNTER'])) {
+			fail(400, 'COUNTER_REQUIRED');
+		}
 
-    if ($useCounter) {
-        $counter = $post['COUNTER'];
-
-        if (!is_valid_counter($counter)) {
-            fail(400, 'BAD_COUNTER');
-        }
-    } elseif (!ALLOW_LEGACY_POST) {
-        fail(400, 'COUNTER_REQUIRED');
-    }
-
+		$useCounter = true;
+		$counter = $post['COUNTER'];
+		
     // بازسازی بسته باینری اصلی، دقیقاً با ترتیب Firmware
 	$payload =
 		$macRaw .
@@ -1325,54 +1327,28 @@ if (!empty($ackVersions)) {
     header('X-Timer-Count: ' . $p['timer_count']);
 
     // پاسخ نسخه جدید: امضای مستقل سرور
-		if ($hasAckVer) {
+		$cmdverText = implode(',', $commandVersions);
 
-			$cmdverText = implode(',', $commandVersions);
+		$responseSigningData =
+			"SERVER_TO_DEVICE" . "\0" .
+			$counter . "\0" .
+			$response . "\0" .
+			$cmdverText;
 
-			$responseSigningData =
-				"SERVER_TO_DEVICE" . "\0" .
-				$counter . "\0" .
-				$response . "\0" .
-				$cmdverText;
+		$responseSignature = hash_hmac(
+			'sha256',
+			$responseSigningData,
+			$secret,
+			true
+		);
 
-			$responseSignature = hash_hmac(
-				'sha256',
-				$responseSigningData,
-				$secret,
-				true
-			);
-
-			$responseBody =
-				'COUNTER=' . $counter .
-				'&RELAY=' . $response .
-				'&CMDVER=' . $cmdverText .
-				'&SIGNATURE=' . strtoupper(bin2hex($responseSignature));
-
-		} else {
-		// Legacy response for devices without ACKVER.
-			$responseSigningData =
-				"SERVER_TO_DEVICE" . "\0" .
-				$counter . "\0" .
-				$response;
-
-			$responseSignature = hash_hmac(
-				'sha256',
-				$responseSigningData,
-				$secret,
-				true
-			);
-
-			$responseBody =
-				'COUNTER=' . $counter .
-				'&RELAY=' . $response .
-				'&SIGNATURE=' . strtoupper(bin2hex($responseSignature));
-		}
+		$responseBody =
+			'COUNTER=' . $counter .
+			'&RELAY=' . $response .
+			'&CMDVER=' . $cmdverText .
+			'&SIGNATURE=' . strtoupper(bin2hex($responseSignature));
 
 		respond(200, $responseBody);
-
-	
-    // پاسخ ساده برای Firmware قدیمی که هنوز COUNTER نمی‌فرستد
-    respond(200, $response);
 
 //     // دریافت امضای HMAC
 
