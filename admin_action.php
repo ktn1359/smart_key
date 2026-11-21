@@ -315,35 +315,32 @@ if ($action === 'clear') {
         exit('ERROR;CODE=BAD_MAC');
     }
 
-    $raw = @file_get_contents(ADMIN_STATE_FILE);
-
-    $all = ($raw !== false && $raw !== '')
-        ? json_decode($raw, true)
-        : array();
-
-    $entry = (
-        is_array($all) &&
-        isset($all[$mac]) &&
-        is_array($all[$mac])
-    ) ? $all[$mac] : array();
-
-    $lastSeen = isset($entry['last_seen'])
-        ? (int)$entry['last_seen']
-        : 0;
-
-    if ($lastSeen <= 0 || (time() - $lastSeen) > 20) {
-        http_response_code(409);
-        exit('ERROR;CODE=DEVICE_STALE');
-    }
+    $deviceAge = -1;
 
     $ok = admin_json_update(
         ADMIN_STATE_FILE,
-        function (array $all) use ($mac) {
+        function (array $all) use ($mac, &$deviceAge) {
 
             if (
                 !isset($all[$mac]) ||
                 !is_array($all[$mac])
             ) {
+                $deviceAge = -1;
+                return $all;
+            }
+
+            $entry = $all[$mac];
+
+            $lastSeen = isset($entry['last_seen'])
+                ? (int)$entry['last_seen']
+                : 0;
+
+            $deviceAge = $lastSeen > 0
+                ? max(0, time() - $lastSeen)
+                : -1;
+
+            // بررسی تازگی دستگاه در حالی که قفل فایل برقرار است.
+            if ($deviceAge < 0 || $deviceAge > 20) {
                 return $all;
             }
 
@@ -360,9 +357,15 @@ if ($action === 'clear') {
         exit('ERROR;CODE=STATE_STORAGE_ERROR');
     }
 
+    if ($deviceAge < 0 || $deviceAge > 20) {
+        http_response_code(409);
+        exit('ERROR;CODE=DEVICE_STALE');
+    }
+
     header('Location: view.php');
     exit;
 }
+
 if ($action === 'set') {
 
     $mac = isset($_POST['mac']) && is_string($_POST['mac'])
@@ -383,32 +386,7 @@ if ($action === 'set') {
         exit('ERROR;CODE=BAD_STATE');
     }
 
-    // ابتدا بررسی تازگی دستگاه
-    $raw = @file_get_contents(ADMIN_STATE_FILE);
-
-    $all = ($raw !== false && $raw !== '')
-        ? json_decode($raw, true)
-        : array();
-
-    $entry = (
-        is_array($all) &&
-        isset($all[$mac]) &&
-        is_array($all[$mac])
-    ) ? $all[$mac] : array();
-
-    $lastSeen = isset($entry['last_seen'])
-        ? (int)$entry['last_seen']
-        : 0;
-
-    $age = $lastSeen > 0
-        ? max(0, time() - $lastSeen)
-        : -1;
-
-    if ($age < 0 || $age > 20) {
-        http_response_code(409);
-        exit('ERROR;CODE=DEVICE_STALE;AGE=' . $age);
-    }
-
+    $deviceAge = -1;
     $stateLengthError = false;
     $versionError = false;
 
@@ -417,13 +395,27 @@ if ($action === 'set') {
         function (array $all) use (
             $mac,
             $set,
+            &$deviceAge,
             &$stateLengthError,
             &$versionError
         ) {
+
             $entry = (
                 isset($all[$mac]) &&
                 is_array($all[$mac])
             ) ? $all[$mac] : array();
+
+            // بررسی تازگی دستگاه داخل قفل مشترک JSON
+            $lastSeen = isset($entry['last_seen'])
+                ? (int)$entry['last_seen']
+                : 0;
+		$deviceAge = $lastSeen > 0
+                ? max(0, time() - $lastSeen)
+                : -1;
+
+            if ($deviceAge < 0 || $deviceAge > 20) {
+                return $all;
+            }
 
             $reported = isset($entry['reported'])
                 ? $entry['reported']
@@ -452,6 +444,16 @@ if ($action === 'set') {
         }
     );
 
+    if (!$ok) {
+        http_response_code(500);
+        exit('ERROR;CODE=STATE_STORAGE_ERROR');
+    }
+
+    if ($deviceAge < 0 || $deviceAge > 20) {
+        http_response_code(409);
+        exit('ERROR;CODE=DEVICE_STALE;AGE=' . $deviceAge);
+    }
+
     if ($stateLengthError) {
         http_response_code(400);
         exit('ERROR;CODE=BAD_STATE_LENGTH');
@@ -460,10 +462,6 @@ if ($action === 'set') {
     if ($versionError) {
         http_response_code(409);
         exit('ERROR;CODE=RELAY_VERSION_EXHAUSTED');
-    }
-if (!$ok) {
-        http_response_code(500);
-        exit('ERROR;CODE=STATE_STORAGE_ERROR');
     }
 
     header('Location: view.php');
