@@ -108,6 +108,19 @@ static char cloudHost[CLOUD_HOST_MAX_LENGTH + 1] = "net-io.ir";
 static const uint16_t CLOUD_PORT = 80;
 static const char* CLOUD_STATUS_PATH = "/kp4000/test.php";
 
+enum CloudServerTestState : uint8_t
+{
+    CLOUD_SERVER_IDLE = 0,
+    CLOUD_SERVER_TESTING,
+    CLOUD_SERVER_CONNECTED,
+    CLOUD_SERVER_FAILED
+};
+
+static CloudServerTestState cloudServerTestState =
+    CLOUD_SERVER_IDLE;
+
+static bool cloudServerChangePending = false;
+static bool cloudRequestDiscard = false;
 //======================================================
 // VALIDATE IPv4 ADDRESS
 //======================================================
@@ -1719,7 +1732,8 @@ enum CloudRequestType : byte
 {
     CLOUD_REQ_NONE = 0,
     CLOUD_REQ_POLL,
-    CLOUD_REQ_PUSH
+    CLOUD_REQ_PUSH,
+    CLOUD_REQ_TEST
 };
 
 static AsyncClient cloudClient;
@@ -1731,6 +1745,7 @@ static bool cloudRequestFailed = false;
 static unsigned long cloudRequestStartedAt = 0;
 
 static char cloudRequestPath[96] = {0};
+static char cloudRequestHost[CLOUD_HOST_MAX_LENGTH + 1] = {0};
 static char cloudRxBuffer[CLOUD_RX_BUFFER_SIZE] = {0};
 static size_t cloudRxLength = 0;
 static int cloudResponseCode = 0;
@@ -1759,6 +1774,62 @@ static bool cloudObservedRelayState[TOUCH_COUNT] = {false};
 static bool cloudObservedInitialized = false;
 static bool cloudLocalPending[TOUCH_COUNT] = {false};
 
+//======================================================
+// CLOUD SERVER CONFIGURATION API FOR WEB UI
+//======================================================
+
+bool cloudSetServerHostAndTest(const char* host)
+{
+    if (!cloudValidateHost(host))
+        return false;
+
+    // Save first. A failed test must NOT restore the old host.
+    if (!cloudSaveServerHost(host))
+        return false;
+
+    cloudServerTestState = CLOUD_SERVER_TESTING;
+    cloudServerChangePending = true;
+
+    cloudSynced = false;
+    cloudFirstPoll = false;
+
+    // Any active request belongs to the previous server context.
+    if (cloudRequestInFlight || cloudRequestDone)
+    {
+        cloudRequestDiscard = true;
+
+        if (cloudRequestInFlight)
+            cloudClient.close(true);
+    }
+
+    DBG_PRINT("[Cloud] New server selected: ");
+    DBG_PRINTLN(cloudHost);
+
+    return true;
+}
+
+const char* cloudGetServerHost()
+{
+    return cloudHost;
+}
+
+const char* cloudGetServerTestState()
+{
+    switch (cloudServerTestState)
+    {
+        case CLOUD_SERVER_TESTING:
+            return "TESTING";
+
+        case CLOUD_SERVER_CONNECTED:
+            return "CONNECTED";
+
+        case CLOUD_SERVER_FAILED:
+            return "FAILED";
+
+        default:
+            return "IDLE";
+    }
+}
 /*
   //======================================================
   // SERIAL HTTP PACKET DEBUG HELPERS
@@ -2670,7 +2741,7 @@ static void cloudOnConnect(void* arg, AsyncClient* client)
         "Content-Length: %u\r\n"
         "\r\n",
         cloudRequestPath,
-        cloudHost,
+        cloudRequestHost,
         (unsigned int)cloudReportTextLength
     );
 
@@ -2703,6 +2774,9 @@ static void cloudOnData(void* arg, AsyncClient* client, void* data, size_t len)
     (void)arg;
 
     if (cloudRequestFailed || len == 0)
+        return;
+
+    if (cloudRequestDiscard)
         return;
 
     if (cloudRxLength + len >= CLOUD_RX_BUFFER_SIZE)
@@ -2757,7 +2831,8 @@ static bool cloudStartRequest(
     strcpy(cloudRequestPath, path);
 
     if (type != CLOUD_REQ_POLL &&
-        type != CLOUD_REQ_PUSH)
+        type != CLOUD_REQ_PUSH &&
+        type != CLOUD_REQ_TEST)
         return false;
 
     if (!cloudDeviceSecretValid)
@@ -2780,7 +2855,7 @@ static bool cloudStartRequest(
 
     bool buildOk = false;
 
-    if (type == CLOUD_REQ_POLL)
+    if (type == CLOUD_REQ_POLL || type == CLOUD_REQ_TEST)
     {
         if (!cloudBuildStatusPacket())
             return false;
@@ -2833,7 +2908,8 @@ static bool cloudStartRequest(
     cloudRequestInFlight = true;
     cloudRequestStartedAt = millis();
 
-    if (!cloudClient.connect(cloudHost, CLOUD_PORT))
+    strcpy(cloudRequestHost, cloudHost);
+    if (!cloudClient.connect(cloudRequestHost, CLOUD_PORT))
     {
         cloudRequestInFlight = false;
         cloudRequestDone = true;
@@ -2889,23 +2965,36 @@ static void cloudProcessCompletedRequest()
 {
     if (!cloudRequestDone)
         return;
-				
-								  
-		 
-
     cloudRequestDone = false;
+
+    // Ignore every result belonging to the previous server.
+    if (cloudRequestDiscard)
+    {
+        cloudRequestDiscard = false;
+        cloudRequestType = CLOUD_REQ_NONE;
+        cloudRequestFailed = false;
+
+        cloudRxLength = 0;
+        cloudRxBuffer[0] = '\0';
+
+        DBG_PRINTLN("[Cloud] Previous server response discarded");
+
+        return;
+    }
 
     // Print the complete response from the main loop (not inside the async
     // receive callback) so the callback can keep collecting bytes quickly.
      cloudDebugDumpRx();
-//
-bool responseParsed = false;
+    //
+    bool responseParsed = false;
 
-if (!cloudRequestFailed)
-    responseParsed = cloudParseHttpResponse();
+    if (!cloudRequestFailed)
+        responseParsed = cloudParseHttpResponse();
 
-if (responseParsed && cloudResponseCode == 409)
-{
+    if (cloudRequestType != CLOUD_REQ_TEST &&
+        responseParsed &&
+        cloudResponseCode == 409)
+    {
     String errorBody;
 
     if (cloudGetResponseBody(errorBody))
@@ -2930,6 +3019,58 @@ bool requestOk =
     cloudResponseCode >= 200 &&
     cloudResponseCode < 300;
 //
+    //======================================================
+    // SERVER TEST RESPONSE
+    // No relay command is applied in this branch.
+    //======================================================
+
+    if (cloudRequestType == CLOUD_REQ_TEST)
+    {
+        String response;
+        String relayResponse;
+
+        uint32_t ignoredCommandVersions[TOUCH_COUNT] = {0};
+
+        bool testOk =
+            requestOk &&
+            cloudResponseCode == 200;
+
+        if (testOk)
+            testOk = cloudGetResponseBody(response);
+
+        if (testOk)
+        {
+            testOk = cloudValidateSignedResponse(
+                response,
+                cloudRequestCounterText,
+                relayResponse,
+                ignoredCommandVersions);
+        }
+
+        if (testOk)
+        {
+            cloudServerTestState = CLOUD_SERVER_CONNECTED;
+
+            DBG_PRINT("[Cloud] Server TEST CONNECTED: ");
+            DBG_PRINTLN(cloudRequestHost);
+        }
+        else
+        {
+            cloudServerTestState = CLOUD_SERVER_FAILED;
+
+            DBG_PRINT("[Cloud] Server TEST FAILED: ");
+            DBG_PRINTLN(cloudRequestHost);
+        }
+
+        // Start a normal poll after the test.
+        cloudFirstPoll = true;
+        cloudLastPollAttempt = 0;
+
+        cloudRequestType = CLOUD_REQ_NONE;
+        cloudRequestFailed = false;
+
+        return;
+    }
     if (cloudRequestType == CLOUD_REQ_POLL)
     {
         if (requestOk && cloudResponseCode == 200)
@@ -2948,6 +3089,8 @@ bool requestOk =
                     cloudRequestCounterText,
                     relayResponse,
                     commandVersions);
+
+                    cloudServerTestState = CLOUD_SERVER_CONNECTED;
             }
 
             if (requestOk)
@@ -2956,9 +3099,7 @@ bool requestOk =
             if (requestOk)
             {
                 DBG_PRINT("[Cloud] Server status: ");
-                DBG_PRINTLN(response);
-
-												  
+                DBG_PRINTLN(response); 
  
                 for (byte i = 0; i < TOUCH_COUNT; i++)
                 {
@@ -3092,6 +3233,7 @@ bool requestOk =
 
         if (!requestOk)
         {
+          cloudServerTestState = CLOUD_SERVER_FAILED;
             // A failed poll means Internet/server reachability is no longer
             // confirmed. Time manager will stop SNTP on its next pass.
             cloudSynced = false;
@@ -3249,31 +3391,55 @@ void taskCloudSync()
     // Network callbacks never change relay state; apply results here.
     cloudProcessCompletedRequest();
 
-    if (cloudRequestInFlight || WiFi.status() != WL_CONNECTED)
-        return;
+      // Never start another request while the previous one is active.
+      if (cloudRequestInFlight)
+          return;
 
-    unsigned long now = millis();
+      // A newly selected host must be tested before normal polling.
+      if (cloudServerChangePending)
+      {
+          if (WiFi.status() != WL_CONNECTED)
+              return;
 
-    // Poll immediately at boot; after failures use exponential backoff.
-    unsigned long pollInterval = cloudFirstPoll
-        ? CLOUD_RETRY_MIN_MS
-        : (cloudSynced ? CLOUD_POLL_INTERVAL_MS : cloudPollRetryMs);
+          cloudServerChangePending = false;
 
-    if (cloudFirstPoll ||
-        (unsigned long)(now - cloudLastPollAttempt) >= pollInterval)
-							   
-    {
-        cloudLastPollAttempt = now;
-        cloudFirstPoll = false;
+          if (!cloudStartRequest(
+                  CLOUD_REQ_TEST,
+                  CLOUD_STATUS_PATH))
+          {
+              cloudServerTestState = CLOUD_SERVER_FAILED;
 
-        cloudStartRequest(CLOUD_REQ_POLL, CLOUD_STATUS_PATH);
-	 
+              DBG_PRINTLN("[Cloud] Cannot start server test");
+          }
 
-													   
-													
-					 
-        return;
-    }
+          return;
+      }
+
+      if (WiFi.status() != WL_CONNECTED)
+          return;
+
+          unsigned long now = millis();
+
+          // Poll immediately at boot; after failures use exponential backoff.
+          unsigned long pollInterval = cloudFirstPoll
+              ? CLOUD_RETRY_MIN_MS
+              : (cloudSynced ? CLOUD_POLL_INTERVAL_MS : cloudPollRetryMs);
+
+          if (cloudFirstPoll ||
+              (unsigned long)(now - cloudLastPollAttempt) >= pollInterval)
+                      
+          {
+              cloudLastPollAttempt = now;
+              cloudFirstPoll = false;
+
+              cloudStartRequest(CLOUD_REQ_POLL, CLOUD_STATUS_PATH);
+        
+
+                                  
+                                
+                
+              return;
+          }
 
     // Send one pending relay state per request. A later local change is
     // represented by the latest relayState[] value, not an unbounded queue.
