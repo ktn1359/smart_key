@@ -91,7 +91,410 @@ static bool cloudHMACTest()
 //======================================================
 // SERVER
 //======================================================
+//======================================================
+// SERVER CONFIGURATION
+//======================================================
 
+#define CLOUD_SERVER_CONFIG_FILE        "/cloud_server.cfg"
+#define CLOUD_SERVER_CONFIG_TEMP_FILE   "/cloud_server.tmp"
+#define CLOUD_SERVER_CONFIG_BACKUP_FILE "/cloud_server.bak"
+
+#define CLOUD_HOST_MAX_LENGTH 63
+
+static const char CLOUD_DEFAULT_HOST[] = "net-io.ir";
+
+static char cloudHost[CLOUD_HOST_MAX_LENGTH + 1] = "net-io.ir";
+
+static const uint16_t CLOUD_PORT = 80;
+static const char* CLOUD_STATUS_PATH = "/kp4000/test.php";
+
+//======================================================
+// VALIDATE IPv4 ADDRESS
+//======================================================
+
+static bool cloudValidateIPv4(const char* host)
+{
+    if (host == nullptr)
+        return false;
+
+    uint8_t parts = 0;
+    const char* p = host;
+
+    while (*p)
+    {
+        if (parts >= 4)
+            return false;
+
+        uint16_t value = 0;
+        size_t digits = 0;
+        char firstDigit = *p;
+
+        while (*p >= '0' && *p <= '9')
+        {
+            value = (value * 10) + (*p - '0');
+
+            if (value > 255)
+                return false;
+
+            digits++;
+            p++;
+        }
+
+        if (digits == 0)
+            return false;
+
+        // Reject ambiguous leading zeros.
+        if (digits > 1 && firstDigit == '0')
+            return false;
+
+        parts++;
+
+        if (*p == '\0')
+            break;
+
+        if (*p != '.')
+            return false;
+
+        p++;
+
+        if (*p == '\0')
+            return false;
+    }
+
+    return parts == 4;
+}
+
+//======================================================
+// VALIDATE DOMAIN OR IPv4
+//======================================================
+static bool cloudValidateHost(const char* host)
+{
+    if (host == nullptr)
+        return false;
+
+    size_t length = strlen(host);
+
+    if (length == 0 || length > CLOUD_HOST_MAX_LENGTH)
+        return false;
+
+    bool numericDotted = true;
+
+    for (size_t i = 0; i < length; i++)
+    {
+        char c = host[i];
+
+        bool digit = (c >= '0' && c <= '9');
+
+        if (!digit && c != '.')
+            numericDotted = false;
+
+        bool valid =
+            digit ||
+            (c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z') ||
+            c == '.' ||
+            c == '-';
+
+        if (!valid)
+            return false;
+    }
+
+    // A numeric dotted address must be a valid IPv4.
+    if (numericDotted)
+        return cloudValidateIPv4(host);
+
+    // Validate DNS labels.
+    size_t labelStart = 0;
+
+    for (size_t i = 0; i <= length; i++)
+    {
+        if (host[i] == '.' || host[i] == '\0')
+        {
+            size_t labelLength = i - labelStart;
+
+            if (labelLength == 0 || labelLength > 63)
+                return false;
+
+            if (host[labelStart] == '-' ||
+                host[i - 1] == '-')
+                return false;
+
+            labelStart = i + 1;
+        }
+        else
+        {
+            char c = host[i];
+
+            bool valid =
+                (c >= 'a' && c <= 'z') ||
+                (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') ||
+                c == '-';
+
+            if (!valid)
+                return false;
+        }
+    }
+
+    return true;
+}
+
+//======================================================
+// READ AND VALIDATE A SAVED HOST FILE
+//======================================================
+
+static bool cloudReadServerHostFile(
+    const char* path,
+    char output[CLOUD_HOST_MAX_LENGTH + 1])
+{
+    File file = LittleFS.open(path, "r");
+
+    if (!file)
+        return false;
+
+    size_t length = file.readBytesUntil(
+        '\n',
+        output,
+        CLOUD_HOST_MAX_LENGTH + 1
+    );
+
+    bool extraData = file.available() > 0;
+
+    file.close();
+
+    if (length == 0 ||
+        length > CLOUD_HOST_MAX_LENGTH ||
+        extraData)
+        return false;
+
+    output[length] = '\0';
+
+    // Remove optional CR.
+    if (length > 0 && output[length - 1] == '\r')
+        output[length - 1] = '\0';
+
+    return cloudValidateHost(output);
+}
+
+//======================================================
+// LOAD CLOUD SERVER CONFIGURATION
+//======================================================
+
+static bool cloudLoadServerConfig()
+{
+    char loadedHost[CLOUD_HOST_MAX_LENGTH + 1] = {0};
+
+    // Primary configuration.
+    if (cloudReadServerHostFile(
+            CLOUD_SERVER_CONFIG_FILE,
+            loadedHost))
+    {
+        strcpy(cloudHost, loadedHost);
+
+        DBG_PRINT("[Cloud] Server Host loaded: ");
+        DBG_PRINTLN(cloudHost);
+
+        return true;
+    }
+
+    // Recover from backup if primary is missing or corrupted.
+    if (cloudReadServerHostFile(
+            CLOUD_SERVER_CONFIG_BACKUP_FILE,
+            loadedHost))
+    {
+        strcpy(cloudHost, loadedHost);
+
+        DBG_PRINT("[Cloud] Server Host recovered from backup: ");
+        DBG_PRINTLN(cloudHost);
+
+        return true;
+    }
+
+    // No valid saved configuration.
+    strcpy(cloudHost, CLOUD_DEFAULT_HOST);
+
+    DBG_PRINTLN("[Cloud] No valid saved host; using default");
+
+    return false;
+}
+
+//======================================================
+// SAVE CLOUD SERVER HOST
+// Crash-recoverable temp + backup + verification
+//======================================================
+
+static bool cloudSaveServerHost(const char* host)
+{
+    if (!cloudValidateHost(host))
+    {
+        DBG_PRINTLN("[Cloud] Invalid server host");
+        return false;
+    }
+
+    size_t length = strlen(host);
+
+    // Remove stale temporary file.
+    if (LittleFS.exists(CLOUD_SERVER_CONFIG_TEMP_FILE))
+        LittleFS.remove(CLOUD_SERVER_CONFIG_TEMP_FILE);
+
+    // Write temporary configuration.
+    File file = LittleFS.open(
+        CLOUD_SERVER_CONFIG_TEMP_FILE,
+        "w"
+    );
+if (!file)
+    {
+        DBG_PRINTLN("[Cloud] Cannot create temporary config");
+        return false;
+    }
+
+    size_t written = file.write(
+        (const uint8_t*)host,
+        length
+    );
+
+    file.flush();
+    file.close();
+
+    if (written != length)
+    {
+        DBG_PRINTLN("[Cloud] Temporary config write FAILED");
+        LittleFS.remove(CLOUD_SERVER_CONFIG_TEMP_FILE);
+        return false;
+    }
+
+    // Verify temporary file.
+    char verifyHost[CLOUD_HOST_MAX_LENGTH + 1] = {0};
+
+    if (!cloudReadServerHostFile(
+            CLOUD_SERVER_CONFIG_TEMP_FILE,
+            verifyHost) ||
+        strcmp(verifyHost, host) != 0)
+    {
+        DBG_PRINTLN("[Cloud] Temporary config verification FAILED");
+        LittleFS.remove(CLOUD_SERVER_CONFIG_TEMP_FILE);
+        return false;
+    }
+
+    // Check whether a valid backup already exists.
+    bool backupExists = false;
+
+    char backupHost[CLOUD_HOST_MAX_LENGTH + 1] = {0};
+
+    if (cloudReadServerHostFile(
+            CLOUD_SERVER_CONFIG_BACKUP_FILE,
+            backupHost))
+    {
+        backupExists = true;
+    }
+    else if (LittleFS.exists(CLOUD_SERVER_CONFIG_BACKUP_FILE))
+    {
+        LittleFS.remove(CLOUD_SERVER_CONFIG_BACKUP_FILE);
+    }
+
+    // Preserve a valid primary configuration as backup.
+    char currentHost[CLOUD_HOST_MAX_LENGTH + 1] = {0};
+
+    if (LittleFS.exists(CLOUD_SERVER_CONFIG_FILE))
+    {
+        bool primaryValid = cloudReadServerHostFile(
+            CLOUD_SERVER_CONFIG_FILE,
+            currentHost
+        );
+
+        if (primaryValid)
+        {
+            if (backupExists)
+            {
+                if (!LittleFS.remove(CLOUD_SERVER_CONFIG_BACKUP_FILE))
+                {
+                    LittleFS.remove(CLOUD_SERVER_CONFIG_TEMP_FILE);
+                    return false;
+                }
+
+                backupExists = false;
+            }
+
+            if (!LittleFS.rename(
+                    CLOUD_SERVER_CONFIG_FILE,
+                    CLOUD_SERVER_CONFIG_BACKUP_FILE))
+            {
+                DBG_PRINTLN("[Cloud] Cannot preserve previous config");
+                LittleFS.remove(CLOUD_SERVER_CONFIG_TEMP_FILE);
+                return false;
+            }
+
+            backupExists = true;
+        }
+        else
+        {
+            // Keep a valid backup if one exists.
+            if (!LittleFS.remove(CLOUD_SERVER_CONFIG_FILE))
+            {
+                LittleFS.remove(CLOUD_SERVER_CONFIG_TEMP_FILE);
+                return false;
+            }
+        }
+    }
+
+    // Commit the verified temporary file.
+    if (!LittleFS.rename(
+            CLOUD_SERVER_CONFIG_TEMP_FILE,
+            CLOUD_SERVER_CONFIG_FILE))
+    {
+        DBG_PRINTLN("[Cloud] Config commit FAILED");
+
+        if (backupExists &&
+            !LittleFS.exists(CLOUD_SERVER_CONFIG_FILE))
+        {
+            LittleFS.rename(
+                CLOUD_SERVER_CONFIG_BACKUP_FILE,
+                CLOUD_SERVER_CONFIG_FILE
+            );
+        }
+
+        return false;
+    }
+
+    // Verify final configuration.
+    memset(verifyHost, 0, sizeof(verifyHost));
+
+    if (!cloudReadServerHostFile(
+            CLOUD_SERVER_CONFIG_FILE,
+            verifyHost) ||
+        strcmp(verifyHost, host) != 0)
+    {
+        DBG_PRINTLN("[Cloud] Final config verification FAILED");
+
+        LittleFS.remove(CLOUD_SERVER_CONFIG_FILE);
+
+        if (backupExists)
+        {
+            LittleFS.rename(
+                CLOUD_SERVER_CONFIG_BACKUP_FILE,
+                CLOUD_SERVER_CONFIG_FILE
+            );
+        }
+
+        return false;
+    }
+
+    // New configuration is valid and committed.
+    if (backupExists)
+    {
+        if (!LittleFS.remove(CLOUD_SERVER_CONFIG_BACKUP_FILE))
+            DBG_PRINTLN("[Cloud] Backup cleanup deferred");
+    }
+
+    strcpy(cloudHost, host);
+
+    DBG_PRINT("[Cloud] Server Host saved: ");
+    DBG_PRINTLN(cloudHost);
+
+    return true;
+}
+
+  /*
 //======================================================
 // SERVER CONFIGURATION
 //======================================================
@@ -220,7 +623,7 @@ static bool cloudLoadServerConfig()
     }
 
     strcpy(cloudHost, loadedHost);
-DBG_PRINT("[Cloud] Server Host loaded: ");
+  DBG_PRINT("[Cloud] Server Host loaded: ");
     DBG_PRINTLN(cloudHost);
 
     return true;
@@ -267,7 +670,7 @@ static bool cloudSaveServerHost(const char* host)
 
     return true;
 }
-
+*/
 
 //======================================================
 // DEVICE SECRET STORAGE
