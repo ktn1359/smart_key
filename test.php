@@ -205,11 +205,11 @@
 // بارگذاری زیرساخت سرور 14050904
 // -----------------------------------------------------
 
-require_once DIR . '/server_bootstrap.php';
+require_once __DIR__ . '/server_bootstrap.php';
 
-require_once DIR . '/http_response.php';
+require_once __DIR__ . '/http_response.php';
 
-require_once DIR . '/json_storage.php';
+require_once __DIR__ . '/json_storage.php';
 
 // ---------------------------------------------------------------------
 // کمکی‌های رمزگشایی
