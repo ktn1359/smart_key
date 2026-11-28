@@ -215,6 +215,8 @@ require_once __DIR__ . '/packet_parser.php';
 
 require_once __DIR__ . '/json_storage.php';
 
+require_once __DIR__ . '/security_hmac.php';
+
 // ---------------------------------------------------------------------
 // کمکی‌های رمزگشایی
 // ---------------------------------------------------------------------
@@ -337,40 +339,20 @@ if (!isset($post['STATE']) ||
     $counter = $post['COUNTER'];
     $signature = hex2bin($post['SIGNATURE']);
 
-    $secrets = require BASE_DIR . '/device_secrets.php';
-
-    if (!is_array($secrets) || !isset($secrets[$mac])) {
-        fail(401, 'UNKNOWN_DEVICE');
-    }
-
-    $secretHex = $secrets[$mac];
-
-    if (!is_string($secretHex) ||
-        !preg_match('/^[0-9A-Fa-f]{64}$/', $secretHex)) {
-        fail(500, 'INVALID_DEVICE_SECRET');
-    }
-
-    $secret = hex2bin($secretHex);
+		$secret = load_device_secret($mac);	
 
     // Payload مشترک بین Firmware و PHP:
     // MAC خام 6 بایت + Channel یک بایت + State یک بایت
     $payload = $macRaw . chr($channel) . chr($state);
 
-    $signingData =
-        "DEVICE_TO_SERVER" . "\0" .
-        $counter . "\0" .
-        $payload;
-
-    $expectedHmac = hash_hmac(
-        'sha256',
-        $signingData,
-        $secret,
-        true
-    );
-
-    if (!hash_equals($expectedHmac, $signature)) {
-        fail(401, 'INVALID_HMAC');
-    }
+	if (!verify_device_hmac(
+		$secret,
+		$counter,
+		$payload,
+		$signature
+	)) {
+		fail(401, 'INVALID_HMAC');
+	}
 
     $response = '';
     $counterAccepted = true;
@@ -633,36 +615,16 @@ function handle_device_post()
         fail(401, 'UNKNOWN_DEVICE');
     }
 
-    $secretHex = $secrets[$mac];
+	$secret = load_device_secret($mac);
 
-    if (!is_string($secretHex) ||
-        !preg_match('/^[0-9A-Fa-f]{64}$/', $secretHex)) {
-        fail(500, 'INVALID_DEVICE_SECRET');
-    }
-
-    $secret = hex2bin($secretHex);
-
-    // ساخت داده‌ای که باید امضا شود
-    if ($useCounter) {
-        $requestSigningData =
-            "DEVICE_TO_SERVER" . "\0" .
-            $counter . "\0" .
-            $payload;
-    } else {
-        // سازگاری موقت با Firmware قدیمی
-        $requestSigningData = $payload;
-    }
-
-    $expectedHmac = hash_hmac(
-        'sha256',
-        $requestSigningData,
-        $secret,
-        true
-    );
-
-    if (!hash_equals($expectedHmac, $signature)) {
-        fail(401, 'INVALID_HMAC');
-    }
+		if (!verify_device_hmac(
+			$secret,
+			$counter,
+			$payload,
+			$signature
+		)) {
+			fail(401, 'INVALID_HMAC');
+		}
 
     // تجزیه بسته باینری بازسازی‌شده
     $p = parse_packet($payload);
