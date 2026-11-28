@@ -608,13 +608,9 @@ function handle_device_post()
 
     $rawSigned = $payload . $signature;
 
-    // خواندن Secret اختصاصی دستگاه
-    $secrets = require BASE_DIR . '/device_secrets.php';
 
-    if (!is_array($secrets) || !isset($secrets[$mac])) {
-        fail(401, 'UNKNOWN_DEVICE');
-    }
 
+	// دریافت Secret اختصاصی دستگاه
 	$secret = load_device_secret($mac);
 
 		if (!verify_device_hmac(
