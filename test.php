@@ -217,6 +217,8 @@ require_once __DIR__ . '/json_storage.php';
 
 require_once __DIR__ . '/security_hmac.php';
 
+require_once __DIR__ . '/response_builder.php';
+
 // ---------------------------------------------------------------------
 // کمکی‌های رمزگشایی
 // ---------------------------------------------------------------------
@@ -458,24 +460,12 @@ if (!isset($post['STATE']) ||
 			array_fill(0, strlen($response), '0')
 		);
 
-		$responseSigningData =
-			"SERVER_TO_DEVICE" . "\0" .
-			$counter . "\0" .
-			$response . "\0" .
-			$cmdverText;
-
-		$responseSignature = hash_hmac(
-			'sha256',
-			$responseSigningData,
-			$secret,
-			true
+		$responseBody = build_signed_device_response(
+			$counter,
+			$response,
+			$cmdverText,
+			$secret
 		);
-
-		$responseBody =
-			'COUNTER=' . $counter .
-			'&RELAY=' . $response .
-			'&CMDVER=' . $cmdverText .
-			'&SIGNATURE=' . strtoupper(bin2hex($responseSignature));
 
 		respond(200, $responseBody);
 }
@@ -851,27 +841,18 @@ if (!empty($ackVersions)) {
     header('X-Packet-Length: ' . strlen($rawSigned));
     header('X-Timer-Count: ' . $p['timer_count']);
 
-    // پاسخ نسخه جدید: امضای مستقل سرور
+
+
+		// پاسخ نسخه جدید: امضای مستقل سرور
+
 		$cmdverText = implode(',', $commandVersions);
 
-		$responseSigningData =
-			"SERVER_TO_DEVICE" . "\0" .
-			$counter . "\0" .
-			$response . "\0" .
-			$cmdverText;
-
-		$responseSignature = hash_hmac(
-			'sha256',
-			$responseSigningData,
-			$secret,
-			true
+		$responseBody = build_signed_device_response(
+			$counter,
+			$response,
+			$cmdverText,
+			$secret
 		);
-
-		$responseBody =
-			'COUNTER=' . $counter .
-			'&RELAY=' . $response .
-			'&CMDVER=' . $cmdverText .
-			'&SIGNATURE=' . strtoupper(bin2hex($responseSignature));
 
 		respond(200, $responseBody);
 
