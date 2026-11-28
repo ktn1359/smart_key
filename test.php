@@ -219,6 +219,8 @@ require_once __DIR__ . '/security_hmac.php';
 
 require_once __DIR__ . '/response_builder.php';
 
+require_once __DIR__ . '/device_state.php';
+
 // ---------------------------------------------------------------------
 // کمکی‌های رمزگشایی
 // ---------------------------------------------------------------------
@@ -359,8 +361,9 @@ if (!isset($post['STATE']) ||
     $response = '';
     $counterAccepted = true;
 	$serverLastCounter = null; 
-    $stateOk = json_update(
-        STATE_FILE,
+	
+		$stateOk = json_update(
+			STATE_FILE,
 			function (array $all) use (
 				$mac,
 				$channel,
@@ -370,71 +373,18 @@ if (!isset($post['STATE']) ||
 				&$counterAccepted,
 				&$serverLastCounter
 			) {
-            $entry = (isset($all[$mac]) && is_array($all[$mac]))
-                ? $all[$mac]
-                : array();
-
-            // بررسی Counter تکراری یا قدیمی
-				if (isset($entry['last_counter'])) {
-					$lastCounter = $entry['last_counter'];
-					$serverLastCounter = $lastCounter;
-
-					if (!is_valid_counter($lastCounter) ||
-						decimal_compare($counter, $lastCounter) <= 0) {
-						$counterAccepted = false;
-						return $all;
-					}
-				}
-
-            if (!isset($entry['reported']) ||
-                !is_string($entry['reported']) ||
-                !preg_match('/^[01]+$/', $entry['reported'])) {
-                $counterAccepted = false;
-                return $all;
-            }
-
-			$reported = $entry['reported'];
-
-			if ($channel >= strlen($reported)) {
-				$counterAccepted = false;
-				return $all;
+				return apply_relay_push_state(
+					$all,
+					$mac,
+					$channel,
+					$state,
+					$counter,
+					$response,
+					$counterAccepted,
+					$serverLastCounter
+				);
 			}
-
-			// وضعیت واقعی گزارش‌شده از دستگاه
-			$reported[$channel] = (string)$state;
-
-			// اگر برای این دستگاه فرمان معوق وجود دارد،
-			// تغییر محلی دستگاه باید فرمان همان کانال را خنثی کند.
-			$desired = isset($entry['desired'])
-				? $entry['desired']
-				: null;
-
-			if (is_string($desired) &&
-				strlen($desired) === strlen($reported) &&
-				preg_match('/^[01]+$/', $desired)) {
-
-				// فقط کانالی که دستگاه تغییر داده، اصلاح می‌شود.
-				$desired[$channel] = (string)$state;
-
-				// اگر دیگر هیچ اختلافی باقی نمانده، فرمان معوق حذف شود.
-				if ($desired === $reported) {
-					$desired = null;
-				}
-			} else {
-				$desired = null;
-			}
-
-			$entry['reported'] = $reported;
-			$entry['desired'] = $desired;
-			$entry['last_seen'] = time();
-			$entry['last_counter'] = $counter;
-
-			$response = $reported;
-			$all[$mac] = $entry;
-
-            return $all;
-        }
-    );
+		);
 
     if (!$stateOk) {
         fail(500, 'STATE_STORAGE_ERROR');
